@@ -217,6 +217,8 @@ The deployment expects a secret named `optigrade-secrets` with:
 - `BETTER_AUTH_SECRET`
 - `OPTIGRADE_INTERNAL_API_SECRET`
 
+In Kubernetes, `OPTIGRADE_REQUIRE_INTERNAL_SECRET=true` is set by default. The API will reject every non-health request unless the BFF sends `x-optigrade-internal-secret`, so `OPTIGRADE_INTERNAL_API_SECRET` must be present in the secret.
+
 Apply the namespace, config, database, API, web and ingress:
 
 ```bash
@@ -248,6 +250,8 @@ https://optgrade.digital-directive.com
 
 - `.env` and local secret files are ignored.
 - Kubernetes secrets are not versioned.
+- Production builds fail closed when `BETTER_AUTH_SECRET` is missing.
+- The FastAPI service can require `OPTIGRADE_INTERNAL_API_SECRET` for every non-health request.
 - Better Auth uses cookie sessions and organization-aware access control.
 - The browser talks to FastAPI through the Next.js BFF, not directly in authenticated flows.
 - OpenAI integration is optional. If `OPENAI_API_KEY` is absent, the system continues with deterministic structured rules.

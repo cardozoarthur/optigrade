@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://optigrade:optigrade@localhost:55432/optigrade"
     api_cors_origins: str = "http://localhost:3000"
+    optigrade_require_internal_secret: bool = False
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.4"
     optigrade_max_threads: int = 24

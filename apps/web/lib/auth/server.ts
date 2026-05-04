@@ -20,6 +20,18 @@ const trustedOrigins = [
   "http://127.0.0.1:3301"
 ].filter(Boolean) as string[];
 
+function authSecret() {
+  const secret = process.env.BETTER_AUTH_SECRET;
+  if (secret) return secret;
+  if (process.env.NEXT_PHASE === "phase-production-build") {
+    return "optigrade-build-time-placeholder";
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("BETTER_AUTH_SECRET must be configured in production");
+  }
+  return "optigrade-dev-secret-change-before-pilot";
+}
+
 const authPool = new Pool({
   connectionString: databaseUrl
 });
@@ -27,7 +39,7 @@ const authPool = new Pool({
 export const auth = betterAuth({
   appName: "OptiGrade",
   baseURL: baseUrl,
-  secret: process.env.BETTER_AUTH_SECRET ?? "optigrade-dev-secret-change-before-pilot",
+  secret: authSecret(),
   trustedOrigins,
   database: authPool,
   user: {

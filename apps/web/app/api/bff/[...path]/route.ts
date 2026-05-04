@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { getAcademicSession } from "@/lib/auth/session";
-import { roleCan, type PermissionKey } from "@/lib/auth/permissions";
+import { roleCan } from "@/lib/auth/permissions";
+import { resolveBffPermission } from "@/lib/bff-permissions";
 import { getBffMutationTags, getBffReadCachePolicy } from "@/lib/cache-tags";
 
 export const runtime = "nodejs";
@@ -42,7 +43,8 @@ async function proxy(request: NextRequest, context: RouteContext) {
   }
 
   const { path } = await context.params;
-  const permission = resolvePermission(path, request.method, {
+  const permission = resolveBffPermission(path, request.method, {
+    professorId: session.user.professorId ?? null,
     studentId: session.user.studentId ?? null
   });
 
@@ -118,39 +120,4 @@ async function proxy(request: NextRequest, context: RouteContext) {
 
 function ensureSlash(value: string) {
   return value.endsWith("/") ? value : `${value}/`;
-}
-
-function resolvePermission(
-  path: string[],
-  method: string,
-  self: { studentId: string | null }
-): PermissionKey {
-  const [resource, id, child] = path;
-  const write = !["GET", "HEAD"].includes(method);
-
-  if (resource === "health" || resource === "readiness") return "readiness:read";
-  if (resource === "optimization") {
-    if (!write) return "optimization:read";
-    return child === "manual-adjustments" || path.includes("manual-adjustments")
-      ? "optimization:adjust"
-      : "optimization:run";
-  }
-  if (resource === "professors") {
-    if (id && ["availability", "course-preferences", "constraints", "preference-batch"].includes(child ?? "")) {
-      return "faculty:self";
-    }
-    return write ? "faculty:write" : "faculty:read";
-  }
-  if (resource === "students") {
-    if (!id && !write) return "students:self";
-    if (id && ["suggestions", "course-requests", "history"].includes(child ?? "")) return "students:self";
-    if (id && self.studentId === id) return write ? "students:self" : "students:self";
-    return write ? "students:write" : "students:read";
-  }
-  if (resource === "imports") return "catalog:write";
-  if (["courses", "campuses", "degree-programs", "course-restrictions", "rooms", "timeslots"].includes(resource)) {
-    return write ? "catalog:write" : "catalog:read";
-  }
-
-  return write ? "catalog:write" : "catalog:read";
 }

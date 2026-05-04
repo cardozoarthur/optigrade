@@ -36,7 +36,15 @@ app.add_middleware(
 
 @app.middleware("http")
 async def require_internal_secret(request: Request, call_next):
-    if settings.optigrade_internal_api_secret and request.url.path != "/health":
+    secret_required = settings.optigrade_require_internal_secret or bool(
+        settings.optigrade_internal_api_secret
+    )
+    if secret_required and request.url.path != "/health":
+        if not settings.optigrade_internal_api_secret:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "OPTIGRADE_INTERNAL_API_SECRET nao configurado"},
+            )
         provided = request.headers.get("x-optigrade-internal-secret")
         if provided != settings.optigrade_internal_api_secret:
             return JSONResponse(

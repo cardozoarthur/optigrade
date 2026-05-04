@@ -16,6 +16,7 @@ target/
 **/target/
 **/tsconfig.tsbuildinfo
 .playwright-cli/
+arquivos/
 *.log
 *.db
 *.sqlite
