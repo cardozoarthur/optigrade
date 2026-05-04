@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useContext, useMemo, useState } from "react";
 import {
   Assignment,
   OptimizationRun,
@@ -16,6 +16,7 @@ type PresentationState = {
   run: OptimizationRun | null;
   assignments: Assignment[];
   optimizationStartedAt: number | null;
+  optimizationError: string | null;
   loadStats: () => Promise<void>;
   createTeacherLink: () => Promise<void>;
   createStudentLink: () => Promise<void>;
@@ -34,28 +35,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
   const [run, setRun] = useState<OptimizationRun | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [optimizationStartedAt, setOptimizationStartedAt] = useState<number | null>(null);
-
-  useEffect(() => {
-    const saved = window.sessionStorage.getItem("optigrade:trabalho");
-    if (!saved) return;
-    try {
-      const parsed = JSON.parse(saved) as {
-        run?: OptimizationRun;
-        optimizationStartedAt?: number;
-      };
-      setRun(parsed.run ?? null);
-      setOptimizationStartedAt(parsed.optimizationStartedAt ?? null);
-    } catch {
-      window.sessionStorage.removeItem("optigrade:trabalho");
-    }
-  }, []);
-
-  useEffect(() => {
-    window.sessionStorage.setItem(
-      "optigrade:trabalho",
-      JSON.stringify({ run, optimizationStartedAt })
-    );
-  }, [run, optimizationStartedAt]);
+  const [optimizationError, setOptimizationError] = useState<string | null>(null);
 
   async function loadStats() {
     setStats(await api<PresentationStats>("/presentation/stats"));
@@ -93,40 +73,41 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
 
   async function startOptimization() {
     if (run && (run.status === "pending" || run.status === "running")) return;
-    if (run?.finished_at) return;
-    const nextRun = await api<OptimizationRun>("/optimization/runs", {
-      method: "POST",
-      body: JSON.stringify({
-        semester: "2026/2",
-        profile: "deep",
-        parameters: {
-          student_demand_only: true,
-          auto_enrollment: true,
-          enrollment_stage: "pre_enrollment",
-          source: "trabalho"
-        }
-      })
-    });
-    setRun(nextRun);
+    const startedAt = Date.now();
+    setOptimizationStartedAt(startedAt);
+    setOptimizationError(null);
     setAssignments([]);
-    setOptimizationStartedAt(Date.now());
+    try {
+      const nextRun = await api<OptimizationRun>("/optimization/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          semester: "2026/2",
+          profile: "deep",
+          parameters: {
+            student_demand_only: true,
+            auto_enrollment: true,
+            enrollment_stage: "pre_enrollment",
+            source: "trabalho",
+            presentation_run_id: newRunId(),
+            requested_at: new Date(startedAt).toISOString()
+          }
+        })
+      });
+      setRun(nextRun);
+    } catch (error) {
+      setOptimizationError(error instanceof Error ? error.message : "Falha ao iniciar otimização");
+      setRun(null);
+    }
   }
 
   async function refreshOptimization() {
-    const targetRun = run ?? (await latestRun());
+    const targetRun = run;
     if (!targetRun) return;
     const fresh = await api<OptimizationRun>(`/optimization/runs/${targetRun.id}`);
     setRun(fresh);
     if (fresh.status === "feasible" || fresh.status === "infeasible" || fresh.status === "failed") {
       setAssignments(await api<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`));
     }
-  }
-
-  async function latestRun() {
-    const runs = await api<OptimizationRun[]>("/optimization/runs");
-    const latest = runs[0] ?? null;
-    setRun(latest);
-    return latest;
   }
 
   const value = useMemo(
@@ -137,6 +118,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
       run,
       assignments,
       optimizationStartedAt,
+      optimizationError,
       loadStats,
       createTeacherLink,
       createStudentLink,
@@ -145,10 +127,16 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
       startOptimization,
       refreshOptimization
     }),
-    [teacherLink, studentLink, stats, run, assignments, optimizationStartedAt]
+    [teacherLink, studentLink, stats, run, assignments, optimizationStartedAt, optimizationError]
   );
 
   return <PresentationContext.Provider value={value}>{children}</PresentationContext.Provider>;
+}
+
+function newRunId() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function usePresentation() {

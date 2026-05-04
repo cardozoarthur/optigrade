@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
@@ -18,14 +18,12 @@ import {
   Loader2,
   Play,
   School,
-  Timer,
   Users
 } from "lucide-react";
 import {
   Assignment,
   Campus,
   Course,
-  PresentationStats,
   Professor,
   Room,
   TimeSlot,
@@ -46,7 +44,6 @@ import { ThreeNetworkScene } from "./three-network-scene";
 export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
   const router = useRouter();
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const previousSlugRef = useRef(slug);
   const {
     revokeTeacherLink,
     revokeStudentLink,
@@ -55,17 +52,25 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
   const slide = slideBySlug(slug);
   const progress = (slide.index / trabalhoSlides.length) * 100;
 
-  const goTo = (nextSlug: TrabalhoSlideSlug) => router.push(`/trabalho/${nextSlug}`);
-  const goNext = () => goTo(nextSlide(slug));
-  const goPrevious = () => goTo(previousSlide(slug));
-
-  useEffect(() => {
-    const previous = previousSlugRef.current;
-    if (previous === "professor" && slug !== "professor") void revokeTeacherLink();
-    if (previous === "alunos" && slug !== "alunos") void revokeStudentLink();
-    if (previous === "parametros" && slug !== "parametros") void startOptimization();
-    previousSlugRef.current = slug;
-  }, [revokeStudentLink, revokeTeacherLink, slug, startOptimization]);
+  const goTo = useCallback(
+    (nextSlug: TrabalhoSlideSlug) => {
+      void (async () => {
+        if (slug === "professor" && nextSlug !== "professor") {
+          await revokeTeacherLink().catch(console.error);
+        }
+        if (slug === "alunos" && nextSlug !== "alunos") {
+          await revokeStudentLink().catch(console.error);
+        }
+        if (slug === "parametros" && nextSlug !== "parametros") {
+          await startOptimization().catch(console.error);
+        }
+        router.push(`/trabalho/${nextSlug}`);
+      })();
+    },
+    [revokeStudentLink, revokeTeacherLink, router, slug, startOptimization]
+  );
+  const goNext = useCallback(() => goTo(nextSlide(slug)), [goTo, slug]);
+  const goPrevious = useCallback(() => goTo(previousSlide(slug)), [goTo, slug]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -81,12 +86,12 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  });
+  }, [goNext, goPrevious]);
 
   return (
     <main
       ref={rootRef}
-      className="min-h-screen overflow-hidden bg-[#f6f8fb] text-ink"
+      className="h-screen overflow-hidden bg-[#f6f8fb] text-ink"
       style={{
         backgroundImage:
           "linear-gradient(135deg, rgba(27,107,147,0.08), transparent 28%), linear-gradient(315deg, rgba(63,125,88,0.09), transparent 34%)"
@@ -95,8 +100,8 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
       <div className="fixed inset-x-0 top-0 z-20 h-1 bg-slateLine">
         <motion.div className="h-full bg-lake" animate={{ width: `${progress}%` }} transition={{ duration: 0.35 }} />
       </div>
-      <header className="fixed inset-x-0 top-1 z-20 border-b border-white/70 bg-white/75 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3">
+      <header className="fixed inset-x-0 top-1 z-20 border-b border-white/70 bg-white/80 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-2">
           <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-normal text-lake">{slide.eyebrow}</p>
             <h1 className="truncate text-base font-semibold sm:text-lg">{slide.title}</h1>
@@ -132,7 +137,7 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -16, scale: 0.99 }}
           transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
-          className="mx-auto grid min-h-screen max-w-7xl content-center px-4 pb-8 pt-24 sm:px-6"
+          className="mx-auto grid h-screen max-w-7xl content-center overflow-hidden px-4 pb-4 pt-20 sm:px-6"
         >
           <SlideContent slug={slug} onNext={goNext} />
         </motion.section>
@@ -243,9 +248,9 @@ function AirProblemSlide() {
 
 function AirSolutionSlide() {
   return (
-    <section className="grid gap-5 lg:grid-cols-[1fr_420px]">
+    <section className="grid max-h-full gap-4 lg:grid-cols-[1fr_380px]">
       <div className="grid gap-4">
-        <h2 className="max-w-3xl text-4xl font-semibold leading-tight sm:text-6xl">
+        <h2 className="max-w-3xl text-3xl font-semibold leading-tight sm:text-5xl">
           A solução foi separar, gerar combinações legais e escolher o conjunto ótimo.
         </h2>
         <p className="max-w-3xl text-lg leading-relaxed text-slate-700">
@@ -280,11 +285,11 @@ function ArticleConclusionSlide() {
 
 function OptigradeProblemSlide() {
   return (
-    <section className="grid gap-5 lg:grid-cols-[420px_1fr]">
+    <section className="grid max-h-full gap-4 lg:grid-cols-[360px_1fr]">
       <Panel>
         <GraduationCap size={34} className="text-lake" />
-        <h2 className="mt-4 text-3xl font-semibold">O problema aparece no atraso do aluno.</h2>
-        <p className="mt-4 text-base leading-relaxed text-slate-700">
+        <h2 className="mt-4 text-2xl font-semibold">O problema aparece no atraso do aluno.</h2>
+        <p className="mt-4 text-sm leading-relaxed text-slate-700">
           Um caso concreto é a tentativa de recuperar Cálculo A por três semestres após reprovação no
           primeiro semestre, causada pela entrada depois do início das aulas e pela perda de uma parte
           essencial da matéria.
@@ -367,23 +372,34 @@ function ParametersSlide({ onNext }: { onNext: () => void }) {
     loadStats().catch(console.error);
   }, [loadStats]);
   return (
-    <section className="grid gap-5">
+    <section className="grid max-h-full gap-4">
       <div>
         <p className="text-sm font-semibold uppercase text-lake">Antes de otimizar</p>
-        <h2 className="mt-2 max-w-4xl text-4xl font-semibold leading-tight sm:text-6xl">
+        <h2 className="mt-2 max-w-4xl text-3xl font-semibold leading-tight sm:text-5xl">
           O sistema vai buscar uma grade sem conflitos, baseada no que alunos e professores informaram.
         </h2>
+        <p className="mt-2 text-sm text-slate-600">
+          Dados lidos da API em tempo real
+          {stats?.updated_at ? ` · ${new Date(stats.updated_at).toLocaleTimeString("pt-BR")}` : ""}.
+        </p>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
         <StatFromApi label="Cursos" value={stats?.degree_programs} icon={School} />
         <StatFromApi label="Unidades" value={stats?.campuses} icon={Database} />
         <StatFromApi label="Professores" value={stats?.professors} icon={Users} />
         <StatFromApi label="Alunos" value={stats?.students} icon={GraduationCap} />
+        <StatFromApi label="Alunos/docente" value={stats?.student_teacher_ratio} suffix="x" icon={GraduationCap} warning={Boolean(stats?.students_needed_for_minimum)} />
         <StatFromApi label="Cadeiras" value={stats?.courses} icon={BookOpen} />
         <StatFromApi label="Salas" value={stats?.rooms} icon={CalendarDays} />
         <StatFromApi label="Threads" value={stats?.threads} icon={Cpu} />
         <StatFromApi label="Memória MB" value={stats?.memory_total_mb ?? undefined} icon={Database} />
+        <StatFromApi label="Meta alunos" value={stats?.minimum_student_target} icon={Users} warning={Boolean(stats?.students_needed_for_minimum)} />
       </div>
+      {stats?.students_needed_for_minimum ? (
+        <div className="rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-sm text-amber">
+          Faltam {stats.students_needed_for_minimum} alunos para a proporção mínima de 10 alunos por professor.
+        </div>
+      ) : null}
       <div className="flex justify-end">
         <button
           type="button"
@@ -401,7 +417,7 @@ function ParametersSlide({ onNext }: { onNext: () => void }) {
 
 function ComparisonSlide() {
   return (
-    <section className="grid gap-5 lg:grid-cols-[1fr_1fr]">
+    <section className="grid max-h-full gap-4 lg:grid-cols-[1fr_1fr]">
       <ComparisonColumn
         title="Air New Zealand"
         items={[
@@ -427,16 +443,20 @@ function ComparisonSlide() {
 }
 
 function ResultSlide() {
-  const { run, assignments, optimizationStartedAt, refreshOptimization } = usePresentation();
+  const { run, assignments, optimizationStartedAt, optimizationError, startOptimization, refreshOptimization } = usePresentation();
   const [elapsed, setElapsed] = useState(0);
   const [catalog, setCatalog] = useState<CalendarCatalog | null>(null);
   const running = !run || run.status === "pending" || run.status === "running";
 
   useEffect(() => {
+    if (!run) {
+      startOptimization().catch(console.error);
+      return;
+    }
     refreshOptimization().catch(console.error);
-    const poll = window.setInterval(() => refreshOptimization().catch(console.error), 120000);
+    const poll = window.setInterval(() => refreshOptimization().catch(console.error), running ? 10000 : 120000);
     return () => window.clearInterval(poll);
-  }, [refreshOptimization]);
+  }, [refreshOptimization, run, running, startOptimization]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -475,7 +495,8 @@ function ResultSlide() {
           <p className="mt-3 text-lg text-slate-700">
             Status: {run?.status ?? "aguardando"} · Tempo: {formatElapsed(elapsed)}
           </p>
-          <p className="mt-2 text-sm text-slate-600">A busca será atualizada automaticamente a cada 2 minutos.</p>
+          <p className="mt-2 text-sm text-slate-600">A busca é assíncrona e será atualizada automaticamente.</p>
+          {optimizationError ? <p className="mt-2 text-sm text-rose">{optimizationError}</p> : null}
         </div>
       </section>
     );
@@ -525,11 +546,11 @@ function TwoColumn({
   link?: string;
 }) {
   return (
-    <section className="grid items-center gap-6 lg:grid-cols-[1fr_0.9fr]">
+    <section className="grid max-h-full items-center gap-5 lg:grid-cols-[1fr_0.85fr]">
       <div>
         <p className="text-sm font-semibold uppercase text-lake">{eyebrow}</p>
-        <h2 className="mt-3 max-w-4xl text-4xl font-semibold leading-tight sm:text-6xl">{title}</h2>
-        <p className="mt-5 max-w-3xl text-lg leading-relaxed text-slate-700">{body}</p>
+        <h2 className="mt-3 max-w-4xl text-3xl font-semibold leading-tight sm:text-5xl">{title}</h2>
+        <p className="mt-4 max-w-3xl text-base leading-relaxed text-slate-700">{body}</p>
         {link ? (
           <a
             href={link}
@@ -540,13 +561,13 @@ function TwoColumn({
             <Github size={17} /> GitHub público MIT <ExternalLink size={15} />
           </a>
         ) : null}
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+        <div className="mt-5 grid gap-2 sm:grid-cols-3">
           {stats.map(([label, value]) => (
             <MetricTile key={label} label={label} value={value} />
           ))}
         </div>
       </div>
-      <Panel className="h-[340px] overflow-hidden p-0 sm:h-[460px]">{visual}</Panel>
+      <Panel className="h-[260px] overflow-hidden p-0 sm:h-[360px] lg:h-[430px]">{visual}</Panel>
     </section>
   );
 }
@@ -563,12 +584,12 @@ function NarrativeSlide({
   points: string[];
 }) {
   return (
-    <section className="grid gap-6 lg:grid-cols-[0.85fr_1fr]">
-      <Panel className="grid content-between gap-8">
+    <section className="grid max-h-full gap-4 lg:grid-cols-[0.82fr_1fr]">
+      <Panel className="grid content-between gap-5">
         <Icon size={42} className="text-lake" />
         <div>
-          <h2 className="text-4xl font-semibold leading-tight sm:text-6xl">{title}</h2>
-          <p className="mt-5 text-lg leading-relaxed text-slate-700">{lead}</p>
+          <h2 className="text-3xl font-semibold leading-tight sm:text-5xl">{title}</h2>
+          <p className="mt-4 text-base leading-relaxed text-slate-700">{lead}</p>
         </div>
       </Panel>
       <div className="grid content-center gap-3">
@@ -578,7 +599,7 @@ function NarrativeSlide({
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.08 }}
-            className="rounded-md border border-slateLine bg-white px-5 py-5 text-base leading-relaxed shadow-panel"
+            className="rounded-md border border-slateLine bg-white px-4 py-4 text-sm leading-relaxed shadow-panel"
           >
             {point}
           </motion.div>
@@ -602,12 +623,12 @@ function QrSlide({
   onNext: () => void;
 }) {
   return (
-    <section className="grid items-center gap-5 lg:grid-cols-[380px_1fr]">
-      <Panel className="grid justify-items-center gap-4 text-center">
-        <h2 className="text-3xl font-semibold">{title}</h2>
+    <section className="grid max-h-full items-center gap-4 lg:grid-cols-[340px_1fr]">
+      <Panel className="grid justify-items-center gap-3 text-center">
+        <h2 className="text-2xl font-semibold">{title}</h2>
         <p className="text-sm leading-relaxed text-slate-600">{subtitle}</p>
-        <div className="grid h-64 w-64 place-items-center rounded-md border border-slateLine bg-white">
-          {link ? <QRCodeSVG value={link} size={220} /> : <Loader2 className="animate-spin text-lake" />}
+        <div className="grid h-52 w-52 place-items-center rounded-md border border-slateLine bg-white sm:h-60 sm:w-60">
+          {link ? <QRCodeSVG value={link} size={200} /> : <Loader2 className="animate-spin text-lake" />}
         </div>
         {link ? <p className="break-all text-xs text-slate-500">{link}</p> : null}
         <button
@@ -663,19 +684,25 @@ function ComparisonColumn({ title, items }: { title: string; items: string[] }) 
 function StatFromApi({
   label,
   value,
-  icon: Icon
+  icon: Icon,
+  suffix = "",
+  warning = false
 }: {
   label: string;
   value?: number;
   icon: typeof Cpu;
+  suffix?: string;
+  warning?: boolean;
 }) {
   return (
-    <Panel className="p-4">
+    <Panel className={`p-3 ${warning ? "border-amber/40 bg-amber/10" : ""}`}>
       <div className="flex items-center justify-between">
         <span className="text-sm text-slate-600">{label}</span>
-        <Icon size={18} className="text-lake" />
+        <Icon size={18} className={warning ? "text-amber" : "text-lake"} />
       </div>
-      <div className="mt-3 text-3xl font-semibold">{value ?? "-"}</div>
+      <div className="mt-2 text-2xl font-semibold">
+        {typeof value === "number" ? `${formatStatNumber(value)}${suffix}` : "-"}
+      </div>
     </Panel>
   );
 }
@@ -714,30 +741,37 @@ function CalendarPreview({
   const roomById = useMemo(() => indexBy(catalog?.rooms ?? []), [catalog?.rooms]);
   const campusById = useMemo(() => indexBy(catalog?.campuses ?? []), [catalog?.campuses]);
   const slots = [...(catalog?.slots ?? [])].sort((a, b) => a.day - b.day || a.start_minute - b.start_minute);
-  const visibleSlots = slots.slice(0, 18);
+  const usedSlotIds = new Set(assignments.map((assignment) => assignment.time_slot_id));
+  const visibleSlots = slots.filter((slot) => usedSlotIds.has(slot.id)).slice(0, 8);
+  const visibleAssignmentCount = visibleSlots.reduce(
+    (total, slot) => total + assignments.filter((assignment) => assignment.time_slot_id === slot.id).length,
+    0
+  );
   return (
     <Panel className="overflow-hidden p-0">
       <div className="border-b border-slateLine px-5 py-4">
         <h2 className="text-xl font-semibold">Calendário final de ofertas</h2>
-        <p className="text-sm text-slate-600">Visão consolidada das disciplinas ofertadas para o próximo semestre.</p>
+        <p className="text-sm text-slate-600">
+          Visão compacta das primeiras ofertas alocadas. Total: {assignments.length} sessões.
+        </p>
       </div>
-      <div className="grid max-h-[520px] gap-2 overflow-auto p-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid gap-2 p-4 md:grid-cols-2 xl:grid-cols-4">
         {visibleSlots.map((slot) => {
           const cellAssignments = assignments.filter((assignment) => assignment.time_slot_id === slot.id);
           return (
-            <div key={slot.id} className="min-h-32 rounded-md border border-slateLine bg-slate-50 p-3">
+            <div key={slot.id} className="min-h-28 rounded-md border border-slateLine bg-slate-50 p-3">
               <div className="text-xs font-semibold uppercase text-slate-500">
                 {dayLabels[slot.day]} · {minutesToLabel(slot.start_minute)}-{minutesToLabel(slot.end_minute)}
               </div>
               <div className="mt-2 grid gap-2">
                 {cellAssignments.length ? (
-                  cellAssignments.map((assignment) => {
+                  cellAssignments.slice(0, 2).map((assignment) => {
                     const course = courseById[assignment.course_id];
                     const professor = professorById[assignment.professor_id];
                     const room = roomById[assignment.room_id];
                     const campus = campusById[room?.campus_id ?? ""];
                     return (
-                      <div key={assignment.id} className="rounded-md border border-lake/20 bg-white px-3 py-2 text-xs">
+                      <div key={assignment.id} className="rounded-md border border-lake/20 bg-white px-3 py-2 text-[11px]">
                         <div className="font-semibold text-ink">{course?.name ?? assignment.course_id}</div>
                         <div className="mt-1 text-slate-600">{professor?.name ?? assignment.professor_id}</div>
                         <div className="text-slate-600">{room?.name ?? assignment.room_id}{campus ? ` · ${campus.name}` : ""}</div>
@@ -749,10 +783,18 @@ function CalendarPreview({
                     Sem oferta neste horário
                   </div>
                 )}
+                {cellAssignments.length > 2 ? (
+                  <div className="text-[11px] font-semibold text-lake">+{cellAssignments.length - 2} ofertas no mesmo horário</div>
+                ) : null}
               </div>
             </div>
           );
         })}
+        {assignments.length > visibleAssignmentCount ? (
+          <div className="grid min-h-28 place-items-center rounded-md border border-dashed border-lake/30 bg-white p-3 text-center text-sm font-semibold text-lake">
+            +{assignments.length - visibleAssignmentCount} sessões na grade completa
+          </div>
+        ) : null}
       </div>
     </Panel>
   );
@@ -765,6 +807,10 @@ function indexBy<T extends { id: string }>(items: T[]) {
 function formatMs(value: number) {
   if (!value) return "-";
   return formatElapsed(Math.round(value / 1000));
+}
+
+function formatStatNumber(value: number) {
+  return Number.isInteger(value) ? value.toLocaleString("pt-BR") : value.toLocaleString("pt-BR", { maximumFractionDigits: 1 });
 }
 
 function formatElapsed(seconds: number) {

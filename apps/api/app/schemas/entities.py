@@ -427,10 +427,14 @@ class PresentationStatsRead(BaseModel):
     courses: int
     professors: int
     students: int
+    student_teacher_ratio: float
+    minimum_student_target: int
+    students_needed_for_minimum: int
     rooms: int
     threads: int
     cpu_count: int
     memory_total_mb: int | None = None
+    updated_at: datetime
 
 
 class PresentationStudentTokenRead(BaseModel):

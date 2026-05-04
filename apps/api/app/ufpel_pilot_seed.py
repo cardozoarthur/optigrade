@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from math import ceil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import unescape
@@ -39,7 +40,8 @@ PILOT_SEMESTER = "2026/1"
 PILOT_STUDENT_TARGET_SEMESTER = "2026/2"
 PILOT_SOURCE = "ufpel_official_2026_1"
 PILOT_STUDENT_SOURCE = "ufpel_pilot_student_form"
-PILOT_STUDENTS_PER_PROGRAM = 12
+PILOT_STUDENTS_PER_PROGRAM = 180
+MIN_STUDENT_PROFESSOR_RATIO = 10
 
 ENGINEERING_CODES = [
     700,
@@ -550,13 +552,19 @@ def upsert_professor(db: Session, name: str, department: str) -> Professor:
 
 
 def seed_students(db: Session, degree_programs: dict[int, DegreeProgram]) -> dict[str, int]:
-    stats = {"students": 0, "history": 0, "requests": 0}
+    students_per_program = target_pilot_students_per_program(db, degree_programs)
+    stats = {
+        "students": 0,
+        "history": 0,
+        "requests": 0,
+        "students_per_program": students_per_program,
+    }
     for program_code, program in sorted(degree_programs.items()):
         program_courses = official_courses_for_program(db, program.id)
         if not program_courses:
             continue
         max_semester = max(course.recommended_semester for course in program_courses)
-        for index in range(1, PILOT_STUDENTS_PER_PROGRAM + 1):
+        for index in range(1, students_per_program + 1):
             current_semester = pilot_current_semester(index, max_semester, program)
             student = upsert_pilot_student(db, program_code, program, index, current_semester)
             completed_courses, failed_courses = pilot_student_history_courses(
@@ -580,6 +588,15 @@ def seed_students(db: Session, degree_programs: dict[int, DegreeProgram]) -> dic
         raise RuntimeError("Seed de alunos UFPel nao gerou demandas elegiveis")
     db.flush()
     return stats
+
+
+def target_pilot_students_per_program(
+    db: Session,
+    degree_programs: dict[int, DegreeProgram],
+) -> int:
+    program_count = max(1, len(degree_programs))
+    minimum_total = db.query(Professor).count() * MIN_STUDENT_PROFESSOR_RATIO
+    return max(PILOT_STUDENTS_PER_PROGRAM, ceil(minimum_total / program_count))
 
 
 def official_courses_for_program(db: Session, degree_program_id: str) -> list[Course]:

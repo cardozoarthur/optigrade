@@ -194,7 +194,7 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
         <section className="grid gap-3 md:grid-cols-3 xl:grid-cols-9">
           <Metric icon={Activity} label="Conflitos hard" value={latestRun?.metrics?.hard_conflicts ?? "-"} />
           <Metric icon={BrainCircuit} label="Score" value={latestRun?.score ?? "-"} />
-          <Metric icon={Database} label="Cobertura" value={formatPercent(latestRun?.metrics?.coverage)} />
+          <Metric icon={Database} label="Cobertura útil" value={formatPercent(latestRun?.metrics?.coverage)} />
           <Metric icon={CheckCircle2} label="Matriculados" value={enrollmentRound?.enrolled ?? "-"} />
           <Metric icon={AlertTriangle} label="Carga mín." value={latestRun?.metrics?.min_load_warnings ?? "-"} />
           <Metric icon={BookOpen} label="Contextos" value={contextCount} />
@@ -1307,7 +1307,8 @@ function indexBy<T extends { id: string }>(items: T[]) {
 }
 
 function formatPercent(value: unknown) {
-  return typeof value === "number" ? `${Math.round(value * 100)}%` : "-";
+  if (typeof value !== "number") return "-";
+  return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
 }
 
 function isRunInProgress(run: OptimizationRun) {

@@ -179,10 +179,14 @@ export type PresentationStats = {
   courses: number;
   professors: number;
   students: number;
+  student_teacher_ratio: number;
+  minimum_student_target: number;
+  students_needed_for_minimum: number;
   rooms: number;
   threads: number;
   cpu_count: number;
   memory_total_mb?: number | null;
+  updated_at: string;
 };
 
 export type PresentationLink = {

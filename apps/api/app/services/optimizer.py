@@ -170,12 +170,13 @@ def run_optimization(db: Session, run: OptimizationRun) -> OptimizationRun:
     profile = run.profile if run.profile in PROFILE_SETTINGS else settings.optigrade_optimizer_profile
     params = PROFILE_SETTINGS.get(profile, PROFILE_SETTINGS["balanced"]) | run.parameters
     demand_driven = bool(params.get("student_demand_only", profile != "official_ufpel"))
-    snapshot = build_snapshot(db, semester=run.semester, demand_driven=demand_driven)
-    if profile == "official_ufpel":
-        snapshot = official_schedule_snapshot(snapshot)
 
     run.status = RunStatus.running
     db.commit()
+
+    snapshot = build_snapshot(db, semester=run.semester, demand_driven=demand_driven)
+    if profile == "official_ufpel":
+        snapshot = official_schedule_snapshot(snapshot)
 
     diagnosis = diagnose_snapshot(snapshot)
     if diagnosis:
@@ -193,18 +194,24 @@ def run_optimization(db: Session, run: OptimizationRun) -> OptimizationRun:
         ranked = [build_official_schedule_solution(snapshot)]
         best = ranked[0]
     else:
+        large_instance = is_large_instance(snapshot)
         attempts = int(params["attempts"])
-        max_workers = max(1, min(settings.optigrade_max_threads, attempts, 24))
+        local_steps = int(params["local_steps"])
+        if large_instance:
+            attempts = min(attempts, 16)
+            local_steps = min(local_steps, 40)
+        max_worker_cap = 4 if large_instance else 24
+        max_workers = max(1, min(settings.optigrade_max_threads, attempts, max_worker_cap))
         seeds = [random.randrange(1_000_000_000) for _ in range(attempts)]
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             solutions = list(executor.map(lambda seed: build_solution(snapshot, seed), seeds))
 
-        improved = [improve_solution(snapshot, solution, int(params["local_steps"])) for solution in solutions]
-        cp_sat_solution = _try_cp_sat(snapshot, profile)
+        improved = [improve_solution(snapshot, solution, local_steps) for solution in solutions]
+        cp_sat_solution = None if large_instance else _try_cp_sat(snapshot, profile)
         if cp_sat_solution:
             improved.append(cp_sat_solution)
-        rust_solution = _try_optional_rust(snapshot, profile)
+        rust_solution = None if large_instance else _try_optional_rust(snapshot, profile)
         if rust_solution:
             improved.append(rust_solution)
         feasible = [solution for solution in improved if solution.objectives["hard_conflicts"] == 0]
@@ -235,6 +242,9 @@ def run_optimization(db: Session, run: OptimizationRun) -> OptimizationRun:
         "profile": profile,
         "attempts": int(params["attempts"]),
         "workers": 0 if profile == "official_ufpel" else max_workers,
+        "effective_attempts": 0 if profile == "official_ufpel" else attempts,
+        "effective_local_steps": 0 if profile == "official_ufpel" else local_steps,
+        "adaptive_large_instance": profile != "official_ufpel" and is_large_instance(snapshot),
         "borrowed_professors": [
             {
                 "id": professor.id,
@@ -294,6 +304,10 @@ def _try_cp_sat(snapshot: Snapshot, profile: str) -> CandidateSolution | None:
 
     timeout = 2.0 if profile == "fast" else 5.0 if profile == "balanced" else 12.0
     return solve_cp_sat_baseline(snapshot, max_seconds=timeout)
+
+
+def is_large_instance(snapshot: Snapshot) -> bool:
+    return snapshot.student_demand_requests >= 5_000 or len(snapshot.courses) >= 180
 
 
 def build_snapshot(
@@ -1414,14 +1428,16 @@ def evaluate_solution(
         else max(1, math.ceil(course.workload_hours / 2))
         for course in snapshot.courses
     )
-    coverage = assigned_sessions / total_required if total_required else 0
+    raw_coverage = assigned_sessions / total_required if total_required else 0
+    coverage = min(1.0, raw_coverage)
+    overcoverage_sessions = max(0, assigned_sessions - total_required)
     objectives = {
         "hard_conflicts": float(len(hard)),
         "preference_loss": max(0.0, 40.0 - preference_score),
         "load_imbalance": round(load_balance, 3),
         "room_waste": round(room_waste, 3),
         "student_holes": float(student_holes),
-        "coverage_loss": round((1 - coverage) * 100, 3),
+        "coverage_loss": round(max(0.0, 1 - coverage) * 100, 3),
         "criticality_loss": max(0.0, 120.0 - critical_sessions),
         "soft_penalty": float(soft_penalty),
         "min_load_shortfall": round(min_load_shortfall, 3),
@@ -1445,6 +1461,8 @@ def evaluate_solution(
         "assigned_sessions": assigned_sessions,
         "required_sessions": total_required,
         "coverage": round(coverage, 3),
+        "raw_coverage": round(raw_coverage, 3),
+        "overcoverage_sessions": overcoverage_sessions,
         "preference_score": preference_score,
         "room_waste": round(room_waste, 2),
         "load_by_professor": {professor.id: professor_load.get(professor.id, 0) for professor in snapshot.professors},

@@ -41,17 +41,24 @@ router = APIRouter()
 
 
 @router.get("/stats", response_model=PresentationStatsRead)
-def stats(db: Session = Depends(get_db)) -> dict[str, int | None]:
+def stats(db: Session = Depends(get_db)) -> dict[str, float | int | datetime | None]:
+    professors = db.query(Professor).count()
+    students = db.query(Student).count()
+    minimum_student_target = professors * 10
     return {
         "campuses": db.query(Campus).count(),
         "degree_programs": db.query(DegreeProgram).count(),
         "courses": db.query(Course).count(),
-        "professors": db.query(Professor).count(),
-        "students": db.query(Student).count(),
+        "professors": professors,
+        "students": students,
+        "student_teacher_ratio": round(students / professors, 2) if professors else float(students),
+        "minimum_student_target": minimum_student_target,
+        "students_needed_for_minimum": max(0, minimum_student_target - students),
         "rooms": db.query(Room).count(),
         "threads": settings.optigrade_max_threads,
         "cpu_count": os.cpu_count() or 1,
         "memory_total_mb": memory_total_mb(),
+        "updated_at": datetime.now(timezone.utc),
     }
 
 

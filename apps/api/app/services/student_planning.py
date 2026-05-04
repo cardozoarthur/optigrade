@@ -52,6 +52,30 @@ def student_demand_summary(db: Session, semester: str) -> StudentDemandSummary:
         item.id: item
         for item in db.query(Course).filter(Course.id.in_(course_ids)).all()
     }
+    all_courses = {item.id: item for item in db.query(Course).all()}
+    program_context_courses = {
+        (item.degree_program_id, context_key): item
+        for item in all_courses.values()
+        if item.degree_program_id
+        and item.shareable
+        and (context_key := normalize_context_key(item.context_key))
+    }
+    histories = (
+        db.query(StudentCourseHistory)
+        .filter(StudentCourseHistory.student_id.in_(student_ids))
+        .all()
+    )
+    completed_by_student: dict[str, dict[str, StudentCourseHistory]] = {}
+    completed_contexts_by_student: dict[str, dict[str, StudentCourseHistory]] = {}
+    for history in histories:
+        if history.status != StudentCourseStatus.completed:
+            continue
+        completed_by_student.setdefault(history.student_id, {})[history.course_id] = history
+        course = all_courses.get(history.course_id)
+        context_key = normalize_context_key(course.context_key) if course else None
+        if course and course.shareable and context_key:
+            completed_contexts_by_student.setdefault(history.student_id, {})[context_key] = history
+    restrictions_by_course = restrictions_for_courses(db, list(all_courses.keys()))
 
     demand: dict[str, int] = {}
     eligible = 0
@@ -67,12 +91,24 @@ def student_demand_summary(db: Session, semester: str) -> StudentDemandSummary:
             blocked += 1
             continue
 
-        eligibility_course = eligibility_course_for_student(db, student, course)
-        if not eligibility_course or not course_eligible_for_student(db, student, course):
+        eligibility_course = eligibility_course_for_student_cached(
+            student,
+            course,
+            program_context_courses,
+        )
+        completed = completed_by_student.get(student.id, {})
+        completed_contexts = completed_contexts_by_student.get(student.id, {})
+        if not eligibility_course or not course_eligible_for_student_cached(
+            eligibility_course,
+            completed,
+            completed_contexts,
+            restrictions_by_course,
+            all_courses,
+        ):
             blocked += 1
             continue
 
-        demand_course = demand_course_for_student(db, student, course, eligibility_course)
+        demand_course = demand_course_for_student_cached(student, course, eligibility_course)
         demand[demand_course.id] = demand.get(demand_course.id, 0) + 1
         eligible += 1
         relation = regular_relation_for_student(course, student, eligibility_course)
@@ -92,6 +128,58 @@ def student_demand_summary(db: Session, semester: str) -> StudentDemandSummary:
         reoffer_requests=reoffer,
         elective_requests=elective,
     )
+
+
+def eligibility_course_for_student_cached(
+    student: Student,
+    course: Course,
+    program_context_courses: dict[tuple[str | None, str], Course],
+) -> Course | None:
+    if not course.degree_program_id or course.degree_program_id == student.degree_program_id:
+        return course
+    context_key = normalize_context_key(course.context_key)
+    if context_key and course.shareable:
+        return program_context_courses.get((student.degree_program_id, context_key))
+    return None
+
+
+def course_eligible_for_student_cached(
+    eligibility_course: Course,
+    completed: dict[str, StudentCourseHistory],
+    completed_contexts: dict[str, StudentCourseHistory],
+    restrictions_by_course: dict[str, list[CourseRestriction]],
+    course_by_id: dict[str, Course],
+) -> bool:
+    if eligibility_course.id in completed:
+        return False
+    if course_completed_by_context(eligibility_course, completed_contexts):
+        return False
+    for restriction in restrictions_by_course.get(eligibility_course.id, []):
+        if restriction.kind == CourseRestrictionKind.corequisite:
+            continue
+        required_course = course_by_id.get(restriction.required_course_id)
+        if requirement_satisfied(completed, restriction, required_course, completed_contexts):
+            continue
+        if restriction.strength == ConstraintStrength.hard:
+            return False
+    return True
+
+
+def demand_course_for_student_cached(
+    student: Student,
+    requested_course: Course,
+    eligibility_course: Course,
+) -> Course:
+    if (
+        requested_course.degree_program_id
+        and requested_course.degree_program_id != student.degree_program_id
+        and requested_course.shareable
+        and normalize_context_key(requested_course.context_key)
+        == normalize_context_key(eligibility_course.context_key)
+        and regular_relation_for_student(requested_course, student, eligibility_course) == "reoffer"
+    ):
+        return requested_course
+    return eligibility_course
 
 
 def raw_student_demand_by_course(db: Session, semester: str) -> dict[str, int]:

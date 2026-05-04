@@ -12,6 +12,6 @@ data:
   NEXT_PUBLIC_APP_URL: "https://optgrade.digital-directive.com"
   NEXT_PUBLIC_API_URL: "https://optgrade.digital-directive.com/api/bff"
   OPENAI_MODEL: "gpt-5.4"
-  OPTIGRADE_MAX_THREADS: "24"
+  OPTIGRADE_MAX_THREADS: "4"
   OPTIGRADE_OPTIMIZER_PROFILE: "balanced"
   OPTIGRADE_REQUIRE_INTERNAL_SECRET: "true"
