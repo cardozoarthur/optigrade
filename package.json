@@ -12,6 +12,7 @@
     "test": "pnpm --filter @optigrade/web test && cd apps/api && UV_CACHE_DIR=.uv-cache uv run pytest && cd ../../crates/optimizer && cargo test",
     "pilot:smoke": "node scripts/pilot-smoke.mjs",
     "pilot:check": "bash scripts/pilot-check.sh",
+    "videos:trabalho": "node scripts/generate-trabalho-videos.mjs",
     "optimizer:build": "cargo build --manifest-path crates/optimizer/Cargo.toml --release",
     "seed": "cd apps/api && UV_CACHE_DIR=.uv-cache uv run python -m app.seed",
     "migrate": "cd apps/api && UV_CACHE_DIR=.uv-cache uv run alembic upgrade head"
@@ -22,8 +23,15 @@
     "pnpm": ">=10.0.0"
   },
   "pnpm": {
+    "onlyBuiltDependencies": [
+      "ffmpeg-static"
+    ],
     "overrides": {
       "postcss": "8.5.13"
     }
+  },
+  "devDependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "playwright-core": "^1.59.1"
   }
 }

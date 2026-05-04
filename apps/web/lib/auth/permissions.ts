@@ -8,6 +8,7 @@ export const academicStatements = {
   faculty: ["read", "write", "self"],
   students: ["read", "write", "self"],
   optimization: ["read", "run", "adjust"],
+  presentation: ["manage"],
   readiness: ["read"]
 } as const;
 
@@ -22,6 +23,7 @@ export const academicRoles = {
     faculty: ["read", "write", "self"],
     students: ["read", "write", "self"],
     optimization: ["read", "run", "adjust"],
+    presentation: ["manage"],
     readiness: ["read"]
   }),
   pro_reitoria: academicAccessControl.newRole({
@@ -32,6 +34,7 @@ export const academicRoles = {
     faculty: ["read", "write", "self"],
     students: ["read", "write", "self"],
     optimization: ["read", "run", "adjust"],
+    presentation: [],
     readiness: ["read"]
   }),
   chefe_departamento: academicAccessControl.newRole({
@@ -42,6 +45,7 @@ export const academicRoles = {
     faculty: ["read", "write", "self"],
     students: ["read", "write"],
     optimization: ["read", "run", "adjust"],
+    presentation: [],
     readiness: ["read"]
   }),
   coordenador: academicAccessControl.newRole({
@@ -52,6 +56,7 @@ export const academicRoles = {
     faculty: ["read", "write", "self"],
     students: ["read", "write"],
     optimization: ["read", "run", "adjust"],
+    presentation: [],
     readiness: ["read"]
   }),
   professor: academicAccessControl.newRole({
@@ -62,6 +67,7 @@ export const academicRoles = {
     faculty: ["read", "self"],
     students: [],
     optimization: ["read"],
+    presentation: [],
     readiness: ["read"]
   }),
   student: academicAccessControl.newRole({
@@ -72,6 +78,7 @@ export const academicRoles = {
     faculty: [],
     students: ["self"],
     optimization: [],
+    presentation: [],
     readiness: []
   })
 };
@@ -103,6 +110,7 @@ export type PermissionKey =
   | "optimization:read"
   | "optimization:run"
   | "optimization:adjust"
+  | "presentation:manage"
   | "readiness:read";
 
 const rolePermissions: Record<AcademicRole, PermissionKey[]> = {
@@ -122,6 +130,7 @@ const rolePermissions: Record<AcademicRole, PermissionKey[]> = {
     "optimization:read",
     "optimization:run",
     "optimization:adjust",
+    "presentation:manage",
     "readiness:read"
   ],
   pro_reitoria: [

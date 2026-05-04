@@ -83,6 +83,8 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
   const contextCount = new Set(state.courses.map((item) => item.context_key).filter(Boolean)).size;
   const enrollmentRound = latestRun?.metrics?.enrollment_round as EnrollmentRoundSummary | undefined;
   const demandRequests = Number(latestRun?.metrics?.student_demand_requests ?? 0);
+  const runInProgress = latestRun ? isRunInProgress(latestRun) : false;
+  const processing = busy || runInProgress;
 
   async function load() {
     setError(null);
@@ -99,14 +101,24 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
       api<OptimizationRun[]>("/optimization/runs")
     ]);
     setState({ campuses, degreePrograms, courses, courseRestrictions, students, professors, rooms, slots, runs });
-    if (runs[0]) {
+    if (runs[0] && isRunFinal(runs[0])) {
       setAssignments(await api<Assignment[]>(`/optimization/runs/${runs[0].id}/assignments`));
+    } else if (runs[0]) {
+      setAssignments([]);
     }
   }
 
   useEffect(() => {
     load().catch((reason: unknown) => setError(String(reason)));
   }, []);
+
+  useEffect(() => {
+    if (!runInProgress) return;
+    const timer = window.setInterval(() => {
+      load().catch((reason: unknown) => setError(String(reason)));
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [latestRun?.id, latestRun?.status, runInProgress]);
 
   async function runOptimization() {
     setBusy(true);
@@ -124,9 +136,8 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
           }
         })
       });
-      const nextAssignments = await api<Assignment[]>(`/optimization/runs/${run.id}/assignments`);
-      setAssignments(nextAssignments);
-      await load();
+      setState((current) => ({ ...current, runs: [run, ...current.runs.filter((item) => item.id !== run.id)] }));
+      setAssignments([]);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -142,8 +153,8 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
       const run = await api<OptimizationRun>(`/optimization/runs/${latestRun.id}/reoptimize`, {
         method: "POST"
       });
-      setAssignments(await api<Assignment[]>(`/optimization/runs/${run.id}/assignments`));
-      await load();
+      setState((current) => ({ ...current, runs: [run, ...current.runs.filter((item) => item.id !== run.id)] }));
+      setAssignments([]);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -167,7 +178,7 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
           </div>
           <div className="flex items-center gap-2">
             <IconButton icon={RefreshCcw} label="Atualizar dados" onClick={() => load()} />
-            <IconButton icon={Play} label="Gerar grade" onClick={runOptimization} disabled={busy} />
+            <IconButton icon={Play} label="Gerar grade" onClick={runOptimization} disabled={processing} />
           </div>
         </div>
       </header>
@@ -214,20 +225,20 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
                 </select>
               </Field>
               <div className="flex gap-2">
-                <PrimaryButton onClick={runOptimization} disabled={busy}>
-                  {busy ? "Processando" : "Gerar grade"}
+                <PrimaryButton onClick={runOptimization} disabled={processing}>
+                  {processing ? "Processando" : "Gerar grade"}
                 </PrimaryButton>
                 <button
                   type="button"
                   onClick={reoptimize}
-                  disabled={busy || !latestRun}
+                  disabled={processing || !latestRun}
                   className="focus-ring h-10 rounded-md border border-slateLine px-4 text-sm font-semibold text-ink hover:border-lake disabled:opacity-50"
                 >
                   Reotimizar
                 </button>
               </div>
               <AutomaticEnrollmentCard
-                busy={busy}
+                busy={processing}
                 latestRun={latestRun}
                 enrollmentRound={enrollmentRound}
                 demandRequests={demandRequests}
@@ -1297,6 +1308,14 @@ function indexBy<T extends { id: string }>(items: T[]) {
 
 function formatPercent(value: unknown) {
   return typeof value === "number" ? `${Math.round(value * 100)}%` : "-";
+}
+
+function isRunInProgress(run: OptimizationRun) {
+  return run.status === "pending" || run.status === "running";
+}
+
+function isRunFinal(run: OptimizationRun) {
+  return run.status === "feasible" || run.status === "infeasible" || run.status === "failed";
 }
 
 function toMinutes(value: string) {

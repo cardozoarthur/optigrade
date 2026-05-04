@@ -45,6 +45,21 @@ Base local: `http://localhost:8000`
 - `POST /optimization/runs/{id}/manual-adjustments`
 - `POST /optimization/runs/{id}/reoptimize`
 
+As chamadas `POST /optimization/runs` e `POST /optimization/runs/{id}/reoptimize` sao exclusivamente assincronas. Elas criam ou reutilizam uma `OptimizationRun` ativa, retornam imediatamente com status `pending` ou `running`, e a execucao ocorre em background. Clientes devem consultar `GET /optimization/runs/{id}` ate `finished_at` ser preenchido ou o status chegar em `feasible`, `infeasible` ou `failed`; somente depois disso os `assignments` representam o calendario final.
+
+## Apresentacao academica
+
+- `GET /presentation/stats`
+- `POST /presentation/teacher-link`
+- `POST /presentation/teacher-link/{token}/revoke`
+- `POST /presentation/student-link`
+- `POST /presentation/student-link/{token}/revoke`
+- `GET /presentation/student-tokens/{token}`
+- `POST /presentation/student-tokens/{token}/students`
+- `POST /presentation/student-tokens/{token}/students/{student_id}/choices`
+
+As rotas `/presentation/*` ficam atras do BFF autenticado para o apresentador administrador, exceto o fluxo de alunos, que e exposto pelo Next.js em `/api/trabalho/alunos/*` e validado por token temporario.
+
 ## Portal do professor
 
 - `GET /teacher-portal/{token}`

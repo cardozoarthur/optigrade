@@ -420,6 +420,21 @@ class InvitationLink(Base):
     professor: Mapped[Professor] = relationship(back_populates="invitations")
 
 
+class PresentationToken(Base):
+    __tablename__ = "presentation_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    token: Mapped[str] = mapped_column(String(96), unique=True, nullable=False)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    semester: Mapped[str] = mapped_column(String(32), default="2026/2", nullable=False)
+    degree_program_id: Mapped[str | None] = mapped_column(
+        ForeignKey("degree_programs.id", ondelete="SET NULL")
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 
@@ -465,3 +480,4 @@ Index(
 Index("ix_assignments_run_slot", Assignment.run_id, Assignment.time_slot_id)
 Index("ix_assignments_run_professor", Assignment.run_id, Assignment.professor_id)
 Index("ix_assignments_run_room", Assignment.run_id, Assignment.room_id)
+Index("ix_presentation_tokens_token", PresentationToken.token)

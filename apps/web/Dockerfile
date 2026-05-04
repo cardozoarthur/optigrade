@@ -8,7 +8,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/package.json
-RUN pnpm install --frozen-lockfile --filter @optigrade/web...
+RUN pnpm install --frozen-lockfile --ignore-scripts --filter @optigrade/web...
 
 FROM deps AS builder
 

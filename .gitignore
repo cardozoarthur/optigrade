@@ -16,6 +16,7 @@ target/
 **/target/
 **/tsconfig.tsbuildinfo
 .playwright-cli/
+.trabalho-video-frames/
 arquivos/
 *.log
 *.db

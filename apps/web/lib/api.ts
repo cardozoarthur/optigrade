@@ -173,6 +173,37 @@ export type OptimizationRun = {
   finished_at: string | null;
 };
 
+export type PresentationStats = {
+  campuses: number;
+  degree_programs: number;
+  courses: number;
+  professors: number;
+  students: number;
+  rooms: number;
+  threads: number;
+  cpu_count: number;
+  memory_total_mb?: number | null;
+};
+
+export type PresentationLink = {
+  token: string;
+  url: string;
+  expires_at: string;
+  kind: "teacher" | "student";
+};
+
+export type PresentationStudentToken = {
+  token: string;
+  semester: string;
+  degree_program: DegreeProgram;
+  courses: Course[];
+};
+
+export type PresentationStudentCreated = {
+  student: Student;
+  suggestions: StudentSuggestions;
+};
+
 export type Assignment = {
   id: string;
   run_id: string;

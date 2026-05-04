@@ -9,8 +9,8 @@ from app.schemas import (
     OptimizationRunCreate,
     OptimizationRunRead,
 )
-from app.services.optimizer import run_optimization, validate_manual_assignments
-from app.services.enrollment import run_enrollment_round
+from app.services.optimization_jobs import enqueue_optimization_run, find_active_run
+from app.services.optimizer import validate_manual_assignments
 
 router = APIRouter()
 
@@ -22,6 +22,16 @@ def list_runs(db: Session = Depends(get_db)) -> list[OptimizationRun]:
 
 @router.post("/runs", response_model=OptimizationRunRead)
 def create_run(payload: OptimizationRunCreate, db: Session = Depends(get_db)) -> OptimizationRun:
+    active_run = find_active_run(
+        db,
+        semester=payload.semester,
+        profile=payload.profile,
+        parameters=payload.parameters,
+    )
+    if active_run:
+        enqueue_optimization_run(active_run.id)
+        return active_run
+
     run = OptimizationRun(
         semester=payload.semester,
         profile=payload.profile,
@@ -30,10 +40,8 @@ def create_run(payload: OptimizationRunCreate, db: Session = Depends(get_db)) ->
     db.add(run)
     db.commit()
     db.refresh(run)
-    result = run_optimization(db, run)
-    maybe_run_automatic_enrollment(db, result)
-    db.refresh(result)
-    return result
+    enqueue_optimization_run(run.id)
+    return run
 
 
 @router.get("/runs/{run_id}", response_model=OptimizationRunRead)
@@ -85,30 +93,24 @@ def reoptimize(run_id: str, db: Session = Depends(get_db)) -> OptimizationRun:
     run = db.get(OptimizationRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Execucao nao encontrada")
+    parameters = run.parameters | {"parent_run_id": run.id, "mode": "partial_reoptimization"}
+    active_run = find_active_run(
+        db,
+        semester=run.semester,
+        profile=run.profile,
+        parameters=parameters,
+    )
+    if active_run:
+        enqueue_optimization_run(active_run.id)
+        return active_run
+
     next_run = OptimizationRun(
         semester=run.semester,
         profile=run.profile,
-        parameters=run.parameters | {"parent_run_id": run.id, "mode": "partial_reoptimization"},
+        parameters=parameters,
     )
     db.add(next_run)
     db.commit()
     db.refresh(next_run)
-    result = run_optimization(db, next_run)
-    maybe_run_automatic_enrollment(db, result)
-    db.refresh(result)
-    return result
-
-
-def maybe_run_automatic_enrollment(db: Session, run: OptimizationRun) -> None:
-    auto_enrollment = bool(run.parameters.get("auto_enrollment", True))
-    if not auto_enrollment or run.metrics.get("student_demand_requests", 0) <= 0:
-        return
-    stage = str(run.parameters.get("enrollment_stage") or "pre_enrollment")
-    summary = run_enrollment_round(
-        db,
-        target_semester=run.semester,
-        stage=stage,
-        run_id=run.id,
-    )
-    run.metrics = run.metrics | {"enrollment_round": summary}
-    db.commit()
+    enqueue_optimization_run(next_run.id)
+    return next_run

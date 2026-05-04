@@ -28,6 +28,8 @@ Implemented:
 - Student history, prerequisites, suggestions and ordered course request queues.
 - Demand-driven timetable generation from eligible student requests.
 - Automatic enrollment rounds with score-based allocation.
+- Fully asynchronous optimization runs; API requests enqueue jobs and return immediately.
+- Routed academic presentation at `/trabalho`, with admin-only slides and temporary QR codes.
 - Kubernetes manifests for Traefik and the pilot domain.
 - Full academic documentation in Markdown.
 
@@ -49,6 +51,8 @@ The MVP does not depend on a single solver. A run can combine:
 - optional Rust optimizer bridge;
 - Pareto-style ranking and weighted scoring;
 - automatic enrollment scoring after timetable generation.
+
+`POST /optimization/runs` and `POST /optimization/runs/{id}/reoptimize` are asynchronous. They return an `OptimizationRun` in `pending` or `running` state, and clients poll `GET /optimization/runs/{id}` plus `GET /optimization/runs/{id}/assignments` for the final timetable.
 
 Current hard constraints include teacher double-booking, room double-booking, room capacity, compatible campus, teacher qualification, lab requirements, course regular time windows and teacher maximum workload.
 
@@ -150,6 +154,9 @@ Open:
 - Web: http://localhost:3000
 - API docs: http://localhost:8000/docs
 - First admin setup: http://localhost:3000/setup
+- Academic presentation: http://localhost:3000/trabalho
+
+The presentation uses routed slides such as `/trabalho/apresentacao` and aliases like `/trabalho/slide1`.
 
 ## Pilot Data
 
@@ -189,6 +196,12 @@ Frontend typecheck and tests:
 ```bash
 pnpm --filter @optigrade/web exec tsc --noEmit
 pnpm --filter @optigrade/web test
+```
+
+Presentation walkthrough videos:
+
+```bash
+pnpm videos:trabalho
 ```
 
 Full local check:

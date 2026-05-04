@@ -9,6 +9,7 @@ from app.api.routes import (
     enrollment,
     imports,
     optimization,
+    presentation,
     professors,
     rooms,
     students,
@@ -17,6 +18,7 @@ from app.api.routes import (
 )
 from app.core.config import settings
 from app.db.session import get_db
+from app.services.optimization_jobs import recover_optimization_jobs
 from app.services.readiness import build_readiness_report
 
 app = FastAPI(
@@ -64,6 +66,12 @@ app.include_router(imports.router, prefix="/imports", tags=["imports"])
 app.include_router(optimization.router, prefix="/optimization", tags=["optimization"])
 app.include_router(enrollment.router, prefix="/enrollment", tags=["enrollment"])
 app.include_router(teacher_portal.router, prefix="/teacher-portal", tags=["teacher portal"])
+app.include_router(presentation.router, prefix="/presentation", tags=["presentation"])
+
+
+@app.on_event("startup")
+def recover_pending_optimization_jobs() -> None:
+    recover_optimization_jobs()
 
 
 @app.get("/health")

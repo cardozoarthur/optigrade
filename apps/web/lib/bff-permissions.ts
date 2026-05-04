@@ -14,6 +14,7 @@ export function resolveBffPermission(
   const write = !["GET", "HEAD"].includes(method);
 
   if (resource === "health" || resource === "readiness") return "readiness:read";
+  if (resource === "presentation") return "presentation:manage";
   if (resource === "optimization") {
     if (!write) return "optimization:read";
     return child === "manual-adjustments" || path.includes("manual-adjustments")

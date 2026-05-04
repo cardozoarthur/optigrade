@@ -406,3 +406,54 @@ class TeacherPortalSubmit(BaseModel):
     availability: list[ProfessorAvailabilityCreate] = Field(default_factory=list)
     course_preferences: list[ProfessorCoursePreferenceCreate] = Field(default_factory=list)
     natural_language_constraints: list[NaturalLanguageConstraintCreate] = Field(default_factory=list)
+
+
+class PresentationLinkCreate(BaseModel):
+    semester: str = "2026/2"
+    professor_id: str | None = None
+    degree_program_id: str | None = None
+
+
+class PresentationLinkRead(BaseModel):
+    token: str
+    url: str
+    expires_at: datetime
+    kind: str
+
+
+class PresentationStatsRead(BaseModel):
+    campuses: int
+    degree_programs: int
+    courses: int
+    professors: int
+    students: int
+    rooms: int
+    threads: int
+    cpu_count: int
+    memory_total_mb: int | None = None
+
+
+class PresentationStudentTokenRead(BaseModel):
+    token: str
+    semester: str
+    degree_program: DegreeProgramRead
+    courses: list[CourseRead]
+
+
+class PresentationStudentCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=180)
+    email: str | None = Field(default=None, max_length=220)
+
+
+class PresentationStudentCreatedRead(BaseModel):
+    student: StudentRead
+    suggestions: StudentSuggestionsRead
+
+
+class PresentationStudentChoicesCreate(BaseModel):
+    course_ids: list[str] = Field(min_length=1, max_length=12)
+    queue_mode: bool = True
+
+
+class PresentationStudentChoicesRead(BaseModel):
+    requests: list[StudentCourseRequestRead]

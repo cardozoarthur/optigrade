@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     optigrade_optimizer_profile: str = "balanced"
     optigrade_optimizer_bin: str | None = None
     optigrade_internal_api_secret: str | None = None
+    next_public_app_url: str = "http://localhost:3000"
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../../.env"),
