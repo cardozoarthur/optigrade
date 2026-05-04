@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optigrade-config
+  namespace: optigrade
+  labels:
+    app.kubernetes.io/name: optigrade
+data:
+  API_CORS_ORIGINS: "https://optgrade.digital-directive.com"
+  BETTER_AUTH_URL: "https://optgrade.digital-directive.com"
+  FASTAPI_INTERNAL_URL: "http://optigrade-api:8000"
+  NEXT_PUBLIC_APP_URL: "https://optgrade.digital-directive.com"
+  NEXT_PUBLIC_API_URL: "https://optgrade.digital-directive.com/api/bff"
+  OPENAI_MODEL: "gpt-5.4"
+  OPTIGRADE_MAX_THREADS: "24"
+  OPTIGRADE_OPTIMIZER_PROFILE: "balanced"

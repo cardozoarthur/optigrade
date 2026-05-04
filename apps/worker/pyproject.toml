@@ -1,0 +1,10 @@
+[project]
+name = "optigrade-worker"
+version = "0.1.0"
+description = "Ray worker entrypoint for OptiGrade."
+requires-python = ">=3.11"
+dependencies = [
+  "ray[default]>=2.48.0",
+  "requests>=2.32.0"
+]
+

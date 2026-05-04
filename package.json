@@ -1,0 +1,24 @@
+{
+  "name": "optigrade",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Sistema de otimizacao de oferta de disciplinas para a UFPel.",
+  "scripts": {
+    "dev:web": "pnpm --filter @optigrade/web dev",
+    "dev:api": "cd apps/api && UV_CACHE_DIR=.uv-cache uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "dev:worker": "cd apps/worker && UV_CACHE_DIR=.uv-cache uv run python -m app.main",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "pnpm --filter @optigrade/web lint",
+    "test": "pnpm --filter @optigrade/web test && cd apps/api && UV_CACHE_DIR=.uv-cache uv run pytest && cd ../../crates/optimizer && cargo test",
+    "pilot:smoke": "node scripts/pilot-smoke.mjs",
+    "pilot:check": "bash scripts/pilot-check.sh",
+    "optimizer:build": "cargo build --manifest-path crates/optimizer/Cargo.toml --release",
+    "seed": "cd apps/api && UV_CACHE_DIR=.uv-cache uv run python -m app.seed",
+    "migrate": "cd apps/api && UV_CACHE_DIR=.uv-cache uv run alembic upgrade head"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=10.0.0"
+  }
+}

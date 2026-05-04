@@ -1,0 +1,40 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: optigrade-https-redirect
+  namespace: optigrade
+  labels:
+    app.kubernetes.io/name: optigrade
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: optigrade
+  namespace: optigrade
+  labels:
+    app.kubernetes.io/name: optigrade
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: optigrade-optigrade-https-redirect@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: optgrade.digital-directive.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: optigrade-web
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - optgrade.digital-directive.com
+      secretName: optgrade-digital-directive-com-tls

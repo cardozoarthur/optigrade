@@ -1,0 +1,2 @@
+"""OptiGrade worker package."""
+

@@ -1,0 +1,11 @@
+code,name,workload_hours,theoretical_hours,practical_hours,kind,recommended_semester,expected_demand,requires_lab,criticality,context_key,shareable
+MAT-CALC-A-EP,Calculo A,4,4,0,mandatory,1,45,false,5,calculo-a:engenharias,true
+MAT-CALC-A-EC,Calculo A,4,4,0,mandatory,1,50,false,5,calculo-a:engenharias,true
+COMP-ALGPROG,Algoritmos e Programacao,4,2,2,mandatory,1,70,true,5,programacao-introdutoria:computacao,true
+MAT-ALG-LIN,Algebra Linear,4,4,0,mandatory,2,55,false,4,algebra-linear:exatas,true
+COMP-ED,Estruturas de Dados,4,2,2,mandatory,2,62,true,5,estruturas-de-dados:computacao,true
+COMP-BD,Banco de Dados,4,2,2,mandatory,3,48,true,4,banco-de-dados:computacao,true
+COMP-PO,Pesquisa Operacional,4,4,0,mandatory,5,38,false,5,pesquisa-operacional:exatas,true
+COMP-ES,Engenharia de Software,4,3,1,mandatory,4,45,false,4,engenharia-de-software:computacao,true
+COMP-IA-TOP,Topicos em IA Aplicada,2,1,1,elective,6,32,true,3,ia-aplicada:computacao,true
+COMP-SD,Sistemas Distribuidos,4,3,1,mandatory,6,36,false,4,sistemas-distribuidos:computacao,true
