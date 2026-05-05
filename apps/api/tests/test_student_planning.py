@@ -21,9 +21,13 @@ from app.services.student_planning import build_student_suggestions
 from app.services.student_planning import student_demand_summary
 from app.ufpel_pilot_seed import (
     INSTITUTIONAL_BASE,
+    AUDITORIUM_CAPACITY,
     PILOT_STUDENT_SOURCE,
     PILOT_STUDENT_TARGET_SEMESTER,
     PILOT_STUDENTS_PER_PROGRAM,
+    REGULAR_ROOM_MAX_CAPACITY,
+    REGULAR_ROOM_MIN_CAPACITY,
+    regular_room_capacity,
     seed_students,
 )
 
@@ -370,23 +374,68 @@ def test_demand_driven_snapshot_only_keeps_requested_courses(db_session) -> None
         recommended_semester=5,
         expected_demand=20,
     )
-    student = Student(name="Aluno", degree_program_id=program.id, current_semester=3)
-    db_session.add_all([requested_course, unrequested_course, student])
+    students = [
+        Student(name=f"Aluno {index}", degree_program_id=program.id, current_semester=3)
+        for index in range(3)
+    ]
+    db_session.add_all([requested_course, unrequested_course, *students])
     db_session.flush()
-    db_session.add(
-        StudentCourseRequest(
-            student_id=student.id,
-            course_id=requested_course.id,
-            target_semester="2026/2",
-            priority=5,
-        )
+    db_session.add_all(
+        [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=requested_course.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+            for student in students
+        ]
     )
     db_session.commit()
 
     snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
 
     assert [course.name for course in snapshot.courses] == ["Banco de Dados"]
-    assert snapshot.student_demand_requests == 1
+    assert snapshot.student_demand_requests == 3
+
+
+def test_demand_solver_does_not_open_tiny_section(db_session) -> None:
+    program = DegreeProgram(name="Computacao", code="CC")
+    db_session.add(program)
+    db_session.flush()
+    requested_course = Course(
+        name="Banco de Dados",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=3,
+        expected_demand=20,
+    )
+    students = [
+        Student(name=f"Aluno {index}", degree_program_id=program.id, current_semester=3)
+        for index in range(2)
+    ]
+    db_session.add_all([requested_course, *students])
+    db_session.flush()
+    db_session.add_all(
+        [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=requested_course.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+            for student in students
+        ]
+    )
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+
+    assert snapshot.courses == []
+    assert snapshot.student_demand_requests == 2
+    assert snapshot.student_demand_plan["unplanned_choice_groups"] == 2
 
 
 def test_ineligible_student_request_does_not_increase_solver_demand(db_session) -> None:
@@ -493,3 +542,11 @@ def test_ufpel_pilot_seed_creates_student_cohorts_for_multiple_programs(db_sessi
     assert summary.eligible_requests == stats["requests"]
     assert summary.regular_requests > 0
     assert summary.reoffer_requests > 0
+
+
+def test_pilot_regular_room_capacity_stays_between_10_and_50() -> None:
+    capacities = [regular_room_capacity(index) for index in range(1, 40)]
+
+    assert min(capacities) >= REGULAR_ROOM_MIN_CAPACITY
+    assert max(capacities) <= REGULAR_ROOM_MAX_CAPACITY
+    assert AUDITORIUM_CAPACITY == 200

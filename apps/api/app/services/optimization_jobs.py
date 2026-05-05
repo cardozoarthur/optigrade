@@ -111,7 +111,7 @@ def _mark_run_failed(run_id: str, exc: Exception) -> None:
 
 
 def _maybe_run_automatic_enrollment(db: Session, run: OptimizationRun) -> None:
-    auto_enrollment = bool(run.parameters.get("auto_enrollment", True))
+    auto_enrollment = bool(run.parameters.get("auto_enrollment", False))
     if not auto_enrollment or run.metrics.get("student_demand_requests", 0) <= 0:
         return
     stage = str(run.parameters.get("enrollment_stage") or "pre_enrollment")
@@ -121,5 +121,7 @@ def _maybe_run_automatic_enrollment(db: Session, run: OptimizationRun) -> None:
         stage=stage,
         run_id=run.id,
     )
-    run.metrics = run.metrics | {"enrollment_round": summary}
+    optimization_status = str(run.metrics.get("optimization_status") or RunStatus.feasible.value)
+    run.status = RunStatus(optimization_status)
+    run.metrics = run.metrics | {"enrollment_round": summary, "post_processing": None}
     db.commit()

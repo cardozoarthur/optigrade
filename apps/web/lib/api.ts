@@ -1,4 +1,5 @@
 export const API_URL = "/api/bff";
+export const PUBLIC_PRESENTATION_API_URL = "/api/trabalho/public-bff";
 
 export type Course = {
   id: string;
@@ -127,6 +128,10 @@ export type EnrollmentRoundSummary = {
   blocked: number;
   unallocated_groups: number;
   capacity_by_course?: Record<string, number>;
+  capacity_by_bucket?: Record<string, number>;
+  bucket_by_course?: Record<string, string>;
+  enrolled_by_course?: Record<string, number>;
+  waitlisted_by_course?: Record<string, number>;
 };
 
 export type Professor = {
@@ -223,7 +228,15 @@ export type Assignment = {
 };
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
+  return fetchJson<T>(`${API_URL}${path}`, init);
+}
+
+export async function publicPresentationApi<T>(path: string, init?: RequestInit): Promise<T> {
+  return fetchJson<T>(`${PUBLIC_PRESENTATION_API_URL}${path}`, init);
+}
+
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
     ...init,
     credentials: "include",
     headers: {

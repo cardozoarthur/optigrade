@@ -6,7 +6,7 @@ import {
   OptimizationRun,
   PresentationLink,
   PresentationStats,
-  api
+  publicPresentationApi
 } from "@/lib/api";
 
 type PresentationState = {
@@ -46,12 +46,12 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
   }, [run]);
 
   const loadStats = useCallback(async () => {
-    setStats(await api<PresentationStats>("/presentation/stats"));
+    setStats(await publicPresentationApi<PresentationStats>("/presentation/stats"));
   }, []);
 
   const createTeacherLink = useCallback(async () => {
     if (teacherLink) return;
-    const link = await api<PresentationLink>("/presentation/teacher-link", {
+    const link = await publicPresentationApi<PresentationLink>("/presentation/teacher-link", {
       method: "POST",
       body: JSON.stringify({ semester: "2026/2" })
     });
@@ -60,7 +60,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
 
   const createStudentLink = useCallback(async () => {
     if (studentLink) return;
-    const link = await api<PresentationLink>("/presentation/student-link", {
+    const link = await publicPresentationApi<PresentationLink>("/presentation/student-link", {
       method: "POST",
       body: JSON.stringify({ semester: "2026/2" })
     });
@@ -69,13 +69,13 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
 
   const revokeTeacherLink = useCallback(async () => {
     if (!teacherLink) return;
-    await api(`/presentation/teacher-link/${teacherLink.token}/revoke`, { method: "POST" });
+    await publicPresentationApi(`/presentation/teacher-link/${teacherLink.token}/revoke`, { method: "POST" });
     setTeacherLink(null);
   }, [teacherLink]);
 
   const revokeStudentLink = useCallback(async () => {
     if (!studentLink) return;
-    await api(`/presentation/student-link/${studentLink.token}/revoke`, { method: "POST" });
+    await publicPresentationApi(`/presentation/student-link/${studentLink.token}/revoke`, { method: "POST" });
     setStudentLink(null);
   }, [studentLink]);
 
@@ -93,7 +93,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
     setAssignments([]);
 
     startPromiseRef.current = (async () => {
-      const nextRun = await api<OptimizationRun>("/optimization/runs", {
+      const nextRun = await publicPresentationApi<OptimizationRun>("/optimization/runs", {
         method: "POST",
         body: JSON.stringify({
           semester: "2026/2",
@@ -126,11 +126,11 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
   const refreshOptimization = useCallback(async (runId?: string) => {
     const targetRunId = runId ?? runRef.current?.id;
     if (!targetRunId) return;
-    const fresh = await api<OptimizationRun>(`/optimization/runs/${targetRunId}`);
+    const fresh = await publicPresentationApi<OptimizationRun>(`/optimization/runs/${targetRunId}`);
     runRef.current = fresh;
     setRun(fresh);
     if (fresh.status === "feasible" || fresh.status === "infeasible" || fresh.status === "failed") {
-      setAssignments(await api<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`));
+      setAssignments(await publicPresentationApi<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`));
     }
   }, []);
 

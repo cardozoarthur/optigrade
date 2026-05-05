@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -29,18 +30,58 @@ class StudentDemandSummary:
     elective_requests: int
 
 
+@dataclass(frozen=True)
+class DemandChoice:
+    request: StudentCourseRequest
+    student: Student
+    requested_course: Course
+    eligibility_course: Course
+    demand_course: Course
+    relation: str
+
+
+@dataclass(frozen=True)
+class StudentDemandChoiceSummary:
+    choices_by_group: dict[tuple[str, str], tuple[DemandChoice, ...]]
+    first_choice_demand_by_course: dict[str, int]
+    all_eligible_demand_by_course: dict[str, int]
+    total_requests: int
+    eligible_requests: int
+    blocked_requests: int
+    regular_requests: int
+    reoffer_requests: int
+    elective_requests: int
+
+    @property
+    def choice_groups(self) -> int:
+        return len(self.choices_by_group)
+
+
 def student_demand_by_course(db: Session, semester: str) -> dict[str, int]:
     return student_demand_summary(db, semester).demand_by_course
 
 
 def student_demand_summary(db: Session, semester: str) -> StudentDemandSummary:
+    choice_summary = student_demand_choice_summary(db, semester)
+    return StudentDemandSummary(
+        demand_by_course=choice_summary.first_choice_demand_by_course,
+        total_requests=choice_summary.total_requests,
+        eligible_requests=choice_summary.eligible_requests,
+        blocked_requests=choice_summary.blocked_requests,
+        regular_requests=choice_summary.regular_requests,
+        reoffer_requests=choice_summary.reoffer_requests,
+        elective_requests=choice_summary.elective_requests,
+    )
+
+
+def student_demand_choice_summary(db: Session, semester: str) -> StudentDemandChoiceSummary:
     requests = (
         db.query(StudentCourseRequest)
         .filter(StudentCourseRequest.target_semester == semester)
         .all()
     )
     if not requests:
-        return StudentDemandSummary({}, 0, 0, 0, 0, 0, 0)
+        return StudentDemandChoiceSummary({}, {}, {}, 0, 0, 0, 0, 0, 0)
 
     student_ids = {item.student_id for item in requests}
     course_ids = {item.course_id for item in requests}
@@ -77,7 +118,8 @@ def student_demand_summary(db: Session, semester: str) -> StudentDemandSummary:
             completed_contexts_by_student.setdefault(history.student_id, {})[context_key] = history
     restrictions_by_course = restrictions_for_courses(db, list(all_courses.keys()))
 
-    demand: dict[str, int] = {}
+    choices_by_group: dict[tuple[str, str], list[DemandChoice]] = {}
+    all_eligible_demand: dict[str, int] = {}
     eligible = 0
     blocked = 0
     regular = 0
@@ -109,9 +151,19 @@ def student_demand_summary(db: Session, semester: str) -> StudentDemandSummary:
             continue
 
         demand_course = demand_course_for_student_cached(student, course, eligibility_course)
-        demand[demand_course.id] = demand.get(demand_course.id, 0) + 1
-        eligible += 1
         relation = regular_relation_for_student(course, student, eligibility_course)
+        group = (student.id, request.alternative_group or f"course:{course.id}")
+        choice = DemandChoice(
+            request=request,
+            student=student,
+            requested_course=course,
+            eligibility_course=eligibility_course,
+            demand_course=demand_course,
+            relation=relation,
+        )
+        choices_by_group.setdefault(group, []).append(choice)
+        all_eligible_demand[demand_course.id] = all_eligible_demand.get(demand_course.id, 0) + 1
+        eligible += 1
         if relation == "regular":
             regular += 1
         elif relation == "reoffer":
@@ -119,8 +171,33 @@ def student_demand_summary(db: Session, semester: str) -> StudentDemandSummary:
         elif relation == "elective":
             elective += 1
 
-    return StudentDemandSummary(
-        demand_by_course=demand,
+    ordered_by_group = {
+        group: tuple(
+            sorted(
+                choices,
+                key=lambda item: (
+                    item.request.preference_order,
+                    -item.request.priority,
+                    item.request.created_at,
+                    item.demand_course.name,
+                ),
+            )
+        )
+        for group, choices in choices_by_group.items()
+    }
+    first_choice_demand: dict[str, int] = {}
+    for choices in ordered_by_group.values():
+        if not choices:
+            continue
+        choice = choices[0]
+        first_choice_demand[choice.demand_course.id] = (
+            first_choice_demand.get(choice.demand_course.id, 0) + 1
+        )
+
+    return StudentDemandChoiceSummary(
+        choices_by_group=ordered_by_group,
+        first_choice_demand_by_course=first_choice_demand,
+        all_eligible_demand_by_course=all_eligible_demand,
         total_requests=len(requests),
         eligible_requests=eligible,
         blocked_requests=blocked,
@@ -128,6 +205,13 @@ def student_demand_summary(db: Session, semester: str) -> StudentDemandSummary:
         reoffer_requests=reoffer,
         elective_requests=elective,
     )
+
+
+def demand_from_allocations(choices: Iterable[DemandChoice]) -> dict[str, int]:
+    demand: dict[str, int] = {}
+    for choice in choices:
+        demand[choice.demand_course.id] = demand.get(choice.demand_course.id, 0) + 1
+    return demand
 
 
 def eligibility_course_for_student_cached(

@@ -10,6 +10,7 @@ from app.models.entities import (
     Course,
     CourseRestrictionKind,
     EnrollmentStatus,
+    OptimizationRun,
     Room,
     Student,
     StudentCourseHistory,
@@ -38,6 +39,13 @@ class EnrollmentCandidate:
     breakdown: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class EnrollmentCapacityPlan:
+    capacity_by_course: dict[str, int]
+    capacity_by_bucket: dict[str, int]
+    bucket_by_course: dict[str, str]
+
+
 def run_enrollment_round(
     db: Session,
     target_semester: str,
@@ -63,8 +71,9 @@ def run_enrollment_round(
         )
         .all()
     )
-    capacity_by_course = course_capacity_by_id(db, run_id)
-    used_by_course = {course_id: 0 for course_id in capacity_by_course}
+    capacity_plan = course_capacity_plan(db, run_id)
+    capacity_by_course = capacity_plan.capacity_by_course
+    used_by_bucket = {bucket_id: 0 for bucket_id in capacity_plan.capacity_by_bucket}
     candidates_by_group: dict[tuple[str, str], list[EnrollmentCandidate]] = {}
     blocked = 0
 
@@ -124,21 +133,30 @@ def run_enrollment_round(
             )
             if group in allocated_by_group:
                 continue
-            capacity = capacity_by_course.get(candidate.course.id, candidate.course.expected_demand)
-            used = used_by_course.get(candidate.course.id, 0)
+            bucket_id = capacity_plan.bucket_by_course.get(candidate.course.id, candidate.course.id)
+            capacity = capacity_plan.capacity_by_bucket.get(
+                bucket_id,
+                capacity_by_course.get(candidate.course.id, candidate.course.expected_demand),
+            )
+            used = used_by_bucket.get(bucket_id, 0)
             if used >= capacity:
                 continue
             allocated_by_group[group] = candidate
-            used_by_course[candidate.course.id] = used + 1
+            used_by_bucket[bucket_id] = used + 1
 
     enrolled = 0
     waitlisted = 0
     superseded = 0
+    enrolled_by_course: dict[str, int] = {}
+    waitlisted_by_course: dict[str, int] = {}
     for group, values in candidates_by_group.items():
         allocated = allocated_by_group.get(group)
         for candidate in values:
             if allocated and candidate.request.id == allocated.request.id:
                 enrolled += 1
+                enrolled_by_course[candidate.course.id] = (
+                    enrolled_by_course.get(candidate.course.id, 0) + 1
+                )
                 status = EnrollmentStatus.enrolled.value
                 reason = "Alocado pela rodada automatica"
             elif allocated:
@@ -147,6 +165,9 @@ def run_enrollment_round(
                 reason = "Alternativa posterior descartada porque uma opcao anterior foi alocada"
             else:
                 waitlisted += 1
+                waitlisted_by_course[candidate.course.id] = (
+                    waitlisted_by_course.get(candidate.course.id, 0) + 1
+                )
                 status = EnrollmentStatus.waitlisted.value
                 reason = "Sem vaga nas alternativas informadas"
             add_enrollment(
@@ -173,25 +194,96 @@ def run_enrollment_round(
         "blocked": blocked,
         "unallocated_groups": len(candidates_by_group) - len(allocated_by_group),
         "capacity_by_course": capacity_by_course,
+        "capacity_by_bucket": capacity_plan.capacity_by_bucket,
+        "bucket_by_course": capacity_plan.bucket_by_course,
+        "enrolled_by_course": enrolled_by_course,
+        "waitlisted_by_course": waitlisted_by_course,
     }
 
 
 def course_capacity_by_id(db: Session, run_id: str | None) -> dict[str, int]:
-    capacities = {course.id: course.expected_demand for course in db.query(Course).all()}
+    return course_capacity_plan(db, run_id).capacity_by_course
+
+
+def course_capacity_plan(db: Session, run_id: str | None) -> EnrollmentCapacityPlan:
+    courses = db.query(Course).all()
+    bucket_by_course = {course.id: enrollment_bucket_key(course) for course in courses}
     if not run_id:
-        return capacities
+        capacities = {course.id: course.expected_demand for course in courses}
+        capacity_by_bucket: dict[str, int] = {}
+        for course in courses:
+            bucket_id = bucket_by_course[course.id]
+            capacity_by_bucket[bucket_id] = capacity_by_bucket.get(bucket_id, 0) + course.expected_demand
+        return EnrollmentCapacityPlan(capacities, capacity_by_bucket, bucket_by_course)
+
+    capacities = {course.id: 0 for course in courses}
+    capacity_by_bucket = {bucket_id: 0 for bucket_id in set(bucket_by_course.values())}
+    planned_capacity_by_section = planned_capacity_by_assignment_section(db, run_id)
     rows = (
-        db.query(Assignment.course_id, Room.capacity)
+        db.query(Assignment.course_id, Assignment.session_index, Room.capacity)
         .join(Room, Room.id == Assignment.room_id)
         .filter(Assignment.run_id == run_id)
         .all()
     )
-    assigned_capacities: dict[str, list[int]] = {}
-    for course_id, capacity in rows:
-        assigned_capacities.setdefault(course_id, []).append(int(capacity))
-    for course_id, values in assigned_capacities.items():
-        capacities[course_id] = min(values)
+    section_capacities: dict[tuple[str, int], list[int]] = {}
+    for course_id, session_index, room_capacity in rows:
+        bucket_id = bucket_by_course.get(course_id, f"course:{course_id}")
+        section_index = int(session_index or 0) // 100
+        planned_capacity = planned_capacity_by_section.get((course_id, section_index))
+        effective_capacity = int(room_capacity)
+        if planned_capacity is not None:
+            effective_capacity = min(effective_capacity, planned_capacity)
+        section_capacities.setdefault((bucket_id, section_index), []).append(effective_capacity)
+
+    for (bucket_id, _section_index), values in section_capacities.items():
+        capacity_by_bucket[bucket_id] = capacity_by_bucket.get(bucket_id, 0) + min(values)
+    for course in courses:
+        bucket_id = bucket_by_course[course.id]
+        capacities[course.id] = capacity_by_bucket.get(bucket_id, 0)
+    return EnrollmentCapacityPlan(capacities, capacity_by_bucket, bucket_by_course)
+
+
+def planned_capacity_by_assignment_section(
+    db: Session,
+    run_id: str,
+) -> dict[tuple[str, int], int]:
+    run = db.get(OptimizationRun, run_id)
+    planned_sections = (run.metrics or {}).get("planned_sections") if run else None
+    if not isinstance(planned_sections, list):
+        return {}
+    capacities: dict[tuple[str, int], int] = {}
+    for section in planned_sections:
+        if not isinstance(section, dict):
+            continue
+        course_id = section.get("db_course_id")
+        if not isinstance(course_id, str):
+            continue
+        try:
+            section_index = int(section.get("section_index") or 0)
+            planned_students = int(section.get("planned_students") or 0)
+        except (TypeError, ValueError):
+            continue
+        if planned_students > 0:
+            capacities[(course_id, section_index)] = planned_students
     return capacities
+
+
+def enrollment_bucket_key(course: Course) -> str:
+    context_key = normalize_context_key(course.context_key)
+    if course.shareable and context_key:
+        return "|".join(
+            [
+                "context",
+                context_key,
+                course.campus_id or "any-campus",
+                str(course.workload_hours),
+                str(course.theoretical_hours or 0),
+                str(course.practical_hours or 0),
+                str(course.requires_lab),
+                course.kind.value,
+            ]
+        )
+    return f"course:{course.id}"
 
 
 def score_enrollment_candidate(

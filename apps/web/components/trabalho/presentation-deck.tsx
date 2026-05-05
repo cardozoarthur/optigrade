@@ -27,9 +27,9 @@ import {
   Professor,
   Room,
   TimeSlot,
-  api,
   dayLabels,
-  minutesToLabel
+  minutesToLabel,
+  publicPresentationApi
 } from "@/lib/api";
 import {
   TrabalhoSlideSlug,
@@ -477,11 +477,11 @@ function ResultSlide() {
 
   useEffect(() => {
     Promise.all([
-      api<Course[]>("/courses"),
-      api<Professor[]>("/professors"),
-      api<Room[]>("/rooms"),
-      api<TimeSlot[]>("/timeslots"),
-      api<Campus[]>("/campuses")
+      publicPresentationApi<Course[]>("/courses"),
+      publicPresentationApi<Professor[]>("/professors"),
+      publicPresentationApi<Room[]>("/rooms"),
+      publicPresentationApi<TimeSlot[]>("/timeslots"),
+      publicPresentationApi<Campus[]>("/campuses")
     ])
       .then(([courses, professors, rooms, slots, campuses]) =>
         setCatalog({ courses, professors, rooms, slots, campuses })
@@ -514,13 +514,16 @@ function ResultSlide() {
 
   return (
     <section className="grid gap-5 pb-6">
-      <div className="grid gap-3 md:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-5">
         <MetricTile label="Status" value={run.status} tone={run.status === "feasible" ? "green" : "amber"} />
         <MetricTile label="Tempo total" value={formatMs(Number(run.metrics?.elapsed_ms ?? 0))} />
         <MetricTile label="Conflitos hard" value={String(run.metrics?.hard_conflicts ?? "-")} />
         <MetricTile label="Alocados" value={String(run.metrics?.enrollment_round?.enrolled ?? "-")} tone="green" />
+        <MetricTile label="Turmas abertas" value={String((run.metrics?.planned_sections as unknown[] | undefined)?.length ?? "-")} />
+        <MetricTile label="Alternativas usadas" value={String(run.metrics?.student_demand_plan?.alternative_assignments ?? "-")} />
+        <MetricTile label="Sem turma mínima" value={String(run.metrics?.student_demand_plan?.unplanned_choice_groups ?? "-")} tone="amber" />
       </div>
-      <CalendarPreview assignments={assignments} catalog={catalog} />
+      <CalendarPreview assignments={assignments} catalog={catalog} sectionPlans={plannedSectionsFromMetrics(run.metrics)} />
     </section>
   );
 }
@@ -739,17 +742,38 @@ type CalendarCatalog = {
   campuses: Campus[];
 };
 
+type PlannedSection = {
+  db_course_id: string;
+  section_index: number;
+  section_label: string;
+  planned_students: number;
+  planned_capacity_target?: number;
+  planned_total_demand?: number;
+  planned_unserved_demand?: number;
+  strategy?: string;
+  source_course_ids?: string[];
+};
+
 function CalendarPreview({
   assignments,
-  catalog
+  catalog,
+  sectionPlans
 }: {
   assignments: Assignment[];
   catalog: CalendarCatalog | null;
+  sectionPlans: PlannedSection[];
 }) {
   const courseById = useMemo(() => indexBy(catalog?.courses ?? []), [catalog?.courses]);
   const professorById = useMemo(() => indexBy(catalog?.professors ?? []), [catalog?.professors]);
   const roomById = useMemo(() => indexBy(catalog?.rooms ?? []), [catalog?.rooms]);
   const campusById = useMemo(() => indexBy(catalog?.campuses ?? []), [catalog?.campuses]);
+  const sectionByKey = useMemo(
+    () =>
+      Object.fromEntries(
+        sectionPlans.map((section) => [`${section.db_course_id}:${section.section_index}`, section])
+      ) as Record<string, PlannedSection>,
+    [sectionPlans]
+  );
   const slots = [...(catalog?.slots ?? [])].sort((a, b) => a.day - b.day || a.start_minute - b.start_minute);
   const usedSlotIds = new Set(assignments.map((assignment) => assignment.time_slot_id));
   const visibleSlots = slots.filter((slot) => usedSlotIds.has(slot.id));
@@ -780,11 +804,22 @@ function CalendarPreview({
                     const professor = professorById[assignment.professor_id];
                     const room = roomById[assignment.room_id];
                     const campus = campusById[room?.campus_id ?? ""];
+                    const sectionIndex = Math.floor((assignment.session_index ?? 0) / 100);
+                    const sectionPlan = sectionByKey[`${assignment.course_id}:${sectionIndex}`];
                     return (
                       <div key={assignment.id} className="rounded-md border border-lake/20 bg-white px-3 py-2 text-[11px]">
                         <div className="font-semibold text-ink">{course?.name ?? assignment.course_id}</div>
+                        <div className="mt-1 font-medium text-lake">
+                          {sectionPlan
+                            ? `${sectionPlan.section_label} · ${sectionPlan.planned_students} inscritos`
+                            : `Turma ${sectionIndex + 1}`}
+                        </div>
                         <div className="mt-1 text-slate-600">{professor?.name ?? assignment.professor_id}</div>
-                        <div className="text-slate-600">{room?.name ?? assignment.room_id}{campus ? ` · ${campus.name}` : ""}</div>
+                        <div className="text-slate-600">
+                          {room?.name ?? assignment.room_id}
+                          {room ? ` · ${room.capacity} vagas físicas` : ""}
+                          {campus ? ` · ${campus.name}` : ""}
+                        </div>
                       </div>
                     );
                   })
@@ -804,6 +839,23 @@ function CalendarPreview({
         ) : null}
       </div>
     </Panel>
+  );
+}
+
+function plannedSectionsFromMetrics(metrics: Record<string, any> | null | undefined): PlannedSection[] {
+  const plannedSections = metrics?.planned_sections;
+  if (!Array.isArray(plannedSections)) return [];
+  return plannedSections.filter(isPlannedSection);
+}
+
+function isPlannedSection(value: unknown): value is PlannedSection {
+  if (!value || typeof value !== "object") return false;
+  const section = value as Partial<PlannedSection>;
+  return (
+    typeof section.db_course_id === "string" &&
+    typeof section.section_index === "number" &&
+    typeof section.section_label === "string" &&
+    typeof section.planned_students === "number"
   );
 }
 

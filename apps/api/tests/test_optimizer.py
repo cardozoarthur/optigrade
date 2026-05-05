@@ -1,16 +1,20 @@
 from app.models.entities import (
     Assignment,
+    AvailabilityKind,
     Campus,
     ConstraintStrength,
     Course,
     CourseKind,
     DegreeProgram,
     Professor,
+    ProfessorAvailability,
     ProfessorConstraint,
     ProfessorContract,
     ProfessorQualification,
     Room,
     RoomKind,
+    Student,
+    StudentCourseRequest,
     TimeSlot,
     OptimizationRun,
 )
@@ -340,6 +344,66 @@ def test_structured_professor_availability_constraint_blocks_slot(db_session) ->
     assert assignment.time_slot_id == tuesday.id
 
 
+def test_hard_availability_accepts_ufpel_100_minute_window_inside_120_minute_slot(db_session) -> None:
+    course = Course(
+        name="Calculo I",
+        workload_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=30, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    db_session.add_all([course, professor, room, slot])
+    db_session.flush()
+    db_session.add(ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4))
+    db_session.add(ProfessorQualification(professor_id=professor.id, course_id=course.id))
+    db_session.add(
+        ProfessorAvailability(
+            professor_id=professor.id,
+            day=0,
+            start_minute=480,
+            end_minute=580,
+            kind=AvailabilityKind.available,
+            strength=ConstraintStrength.hard,
+        )
+    )
+    run = OptimizationRun(profile="fast", parameters={"attempts": 4, "local_steps": 2})
+    db_session.add(run)
+    db_session.commit()
+
+    result = run_optimization(db_session, run)
+
+    assert result.status == "feasible"
+    assert result.metrics["hard_conflicts"] == 0
+
+
+def test_supervised_internship_does_not_expand_to_one_session_per_two_hours(db_session) -> None:
+    course = Course(
+        name="Estagio Curricular Profissionalizante",
+        workload_hours=20,
+        kind=CourseKind.mandatory,
+        recommended_semester=8,
+        expected_demand=10,
+    )
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=30, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    db_session.add_all([course, professor, room, slot])
+    db_session.flush()
+    db_session.add(ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4))
+    db_session.add(ProfessorQualification(professor_id=professor.id, course_id=course.id))
+    run = OptimizationRun(profile="fast", parameters={"attempts": 4, "local_steps": 2})
+    db_session.add(run)
+    db_session.commit()
+
+    result = run_optimization(db_session, run)
+
+    assert result.status == "feasible"
+    assert result.metrics["assigned_sessions"] == 1
+
+
 def test_shared_context_groups_equivalent_courses(db_session) -> None:
     campus = Campus(name="Campus Anglo", city="Pelotas")
     production = DegreeProgram(name="Engenharia de Producao", code="EP")
@@ -396,3 +460,85 @@ def test_shared_context_groups_equivalent_courses(db_session) -> None:
     assert set(shared_course.source_course_ids) == {production_calculus.id, civil_calculus.id}
     assert shared_course.id in snapshot.qualifications[professor.id]
     assert diagnose_snapshot(snapshot) == []
+
+
+def test_demand_solver_uses_alternatives_to_avoid_tiny_leftover_section(db_session) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    physics = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    room = Room(name="Sala regular", capacity=50, kind=RoomKind.lecture)
+    db_session.add_all([calculus, physics, room])
+    db_session.flush()
+    students = [
+        Student(name=f"Aluno {index:02d}", degree_program_id=program.id, current_semester=2)
+        for index in range(53)
+    ]
+    db_session.add_all(students)
+    db_session.flush()
+    for index, student in enumerate(students):
+        if index < 50:
+            db_session.add(
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=calculus.id,
+                    target_semester="2026/2",
+                    priority=5,
+                )
+            )
+        elif index < 52:
+            group = f"recuperacao-{index}"
+            db_session.add_all(
+                [
+                    StudentCourseRequest(
+                        student_id=student.id,
+                        course_id=calculus.id,
+                        target_semester="2026/2",
+                        priority=5,
+                        preference_order=1,
+                        alternative_group=group,
+                    ),
+                    StudentCourseRequest(
+                        student_id=student.id,
+                        course_id=physics.id,
+                        target_semester="2026/2",
+                        priority=5,
+                        preference_order=2,
+                        alternative_group=group,
+                    ),
+                ]
+            )
+        else:
+            db_session.add(
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=physics.id,
+                    target_semester="2026/2",
+                    priority=5,
+                )
+            )
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+    demand_by_name = {course.name: course.expected_demand for course in snapshot.courses}
+
+    assert demand_by_name == {"Calculo A": 50, "Fisica I": 3}
+    assert snapshot.student_demand_plan["alternative_assignments"] == 2
+    assert snapshot.student_demand_plan["unplanned_choice_groups"] == 0

@@ -42,6 +42,9 @@ PILOT_SOURCE = "ufpel_official_2026_1"
 PILOT_STUDENT_SOURCE = "ufpel_pilot_student_form"
 PILOT_STUDENTS_PER_PROGRAM = 180
 MIN_STUDENT_PROFESSOR_RATIO = 10
+REGULAR_ROOM_MIN_CAPACITY = 10
+REGULAR_ROOM_MAX_CAPACITY = 50
+AUDITORIUM_CAPACITY = 200
 
 ENGINEERING_CODES = [
     700,
@@ -427,56 +430,81 @@ def seed_rooms(
     max_parallel_labs = max_parallel_sessions(
         [record for record in offering_records if record[2].requires_lab]
     )
+    max_parallel_auditoriums = max_parallel_sessions(
+        [
+            record
+            for record in offering_records
+            if not record[2].requires_lab and record[2].expected_demand > REGULAR_ROOM_MAX_CAPACITY
+        ]
+    )
+    max_parallel_lab_auditoriums = max_parallel_sessions(
+        [
+            record
+            for record in offering_records
+            if record[2].requires_lab and record[2].expected_demand > REGULAR_ROOM_MAX_CAPACITY
+        ]
+    )
     room_count = max(80, max_parallel + 20)
     lab_count = max(40, max_parallel_labs + 20)
-    pilot_capacity = pilot_room_capacity(offering_records)
+    auditorium_count = max(4, max_parallel_auditoriums + 2)
+    lab_auditorium_count = max(2, max_parallel_lab_auditoriums + 1)
+
+    for index in range(1, auditorium_count + 1):
+        upsert_seed_room(
+            db,
+            name=f"UFPel Porto - Auditório piloto {index:03d}",
+            campus_id=campus_id,
+            kind=RoomKind.lecture,
+            capacity=AUDITORIUM_CAPACITY,
+        )
     for index in range(1, room_count + 1):
-        name = f"UFPel Porto - Sala piloto {index:03d}"
-        room = db.query(Room).filter(Room.name == name).first()
-        if not room:
-            room = Room(name=name, kind=RoomKind.lecture, capacity=pilot_capacity, availability={})
-            db.add(room)
-        room.campus_id = campus_id
-        room.capacity = pilot_capacity
-        room.kind = RoomKind.lecture
+        upsert_seed_room(
+            db,
+            name=f"UFPel Porto - Sala piloto {index:03d}",
+            campus_id=campus_id,
+            kind=RoomKind.lecture,
+            capacity=regular_room_capacity(index),
+        )
+    for index in range(1, lab_auditorium_count + 1):
+        upsert_seed_room(
+            db,
+            name=f"UFPel Porto - Auditório técnico piloto {index:03d}",
+            campus_id=campus_id,
+            kind=RoomKind.lab,
+            capacity=AUDITORIUM_CAPACITY,
+        )
     for index in range(1, lab_count + 1):
-        name = f"UFPel Porto - Laboratório piloto {index:03d}"
-        room = db.query(Room).filter(Room.name == name).first()
-        if not room:
-            room = Room(name=name, kind=RoomKind.lab, capacity=pilot_capacity, availability={})
-            db.add(room)
-        room.campus_id = campus_id
-        room.capacity = pilot_capacity
-        room.kind = RoomKind.lab
+        upsert_seed_room(
+            db,
+            name=f"UFPel Porto - Laboratório piloto {index:03d}",
+            campus_id=campus_id,
+            kind=RoomKind.lab,
+            capacity=regular_room_capacity(index),
+        )
     db.flush()
 
 
-def pilot_room_capacity(records: list[tuple[CoursePage, dict[str, object], Course]]) -> int:
-    grouped_demand: dict[tuple[object, ...], int] = {}
-    for _page, _offering, course in records:
-        schedule_key = tuple(
-            sorted(
-                (int(item["day"]), int(item["start_minute"]), int(item["end_minute"]))
-                for item in course.official_schedule
-            )
-        )
-        key: tuple[object, ...]
-        if course.shareable and course.context_key:
-            key = (
-                course.context_key,
-                course.campus_id,
-                course.workload_hours,
-                course.theoretical_hours,
-                course.practical_hours,
-                course.requires_lab,
-                course.kind.value,
-                schedule_key,
-            )
-            grouped_demand[key] = grouped_demand.get(key, 0) + course.expected_demand
-        else:
-            key = (course.id,)
-            grouped_demand[key] = max(grouped_demand.get(key, 0), course.expected_demand)
-    return max(120, max(grouped_demand.values(), default=100) + 20)
+def upsert_seed_room(
+    db: Session,
+    *,
+    name: str,
+    campus_id: str,
+    kind: RoomKind,
+    capacity: int,
+) -> Room:
+    room = db.query(Room).filter(Room.name == name).first()
+    if not room:
+        room = Room(name=name, availability={})
+        db.add(room)
+    room.campus_id = campus_id
+    room.kind = kind
+    room.capacity = capacity
+    return room
+
+
+def regular_room_capacity(index: int) -> int:
+    span = REGULAR_ROOM_MAX_CAPACITY - REGULAR_ROOM_MIN_CAPACITY
+    return REGULAR_ROOM_MIN_CAPACITY + ((index - 1) * 5 % (span + 1))
 
 
 def seed_professors(

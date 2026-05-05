@@ -233,6 +233,10 @@ class EnrollmentRoundRead(BaseModel):
     blocked: int
     unallocated_groups: int
     capacity_by_course: dict[str, int]
+    capacity_by_bucket: dict[str, int] = Field(default_factory=dict)
+    bucket_by_course: dict[str, str] = Field(default_factory=dict)
+    enrolled_by_course: dict[str, int] = Field(default_factory=dict)
+    waitlisted_by_course: dict[str, int] = Field(default_factory=dict)
 
 
 class ProfessorCreate(BaseModel):

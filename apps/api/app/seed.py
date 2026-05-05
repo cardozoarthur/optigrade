@@ -388,10 +388,10 @@ def main() -> None:
         )
 
         rooms = [
-            Room(name="Auditório CC", campus_id=campus_capao.id, capacity=100, kind=RoomKind.lecture),
-            Room(name="Sala 201", campus_id=campus_anglo.id, capacity=60, kind=RoomKind.lecture),
+            Room(name="Auditório CC", campus_id=campus_capao.id, capacity=200, kind=RoomKind.lecture),
+            Room(name="Sala 201", campus_id=campus_anglo.id, capacity=50, kind=RoomKind.lecture),
             Room(name="Sala 305", campus_id=campus_anglo.id, capacity=45, kind=RoomKind.lecture),
-            Room(name="Lab 1", campus_id=campus_capao.id, capacity=72, kind=RoomKind.lab),
+            Room(name="Lab 1", campus_id=campus_capao.id, capacity=50, kind=RoomKind.lab),
             Room(name="Lab 2", campus_id=campus_capao.id, capacity=40, kind=RoomKind.lab),
         ]
         db.add_all(rooms)
