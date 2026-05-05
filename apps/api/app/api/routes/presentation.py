@@ -198,32 +198,72 @@ def submit_student_choices(
     if not student or student.degree_program_id != presentation_token.degree_program_id:
         raise HTTPException(status_code=404, detail="Aluno nao encontrado para este QR Code")
 
+    db.query(StudentCourseRequest).filter(
+        StudentCourseRequest.student_id == student.id,
+        StudentCourseRequest.target_semester == presentation_token.semester,
+        StudentCourseRequest.stage == "pre_enrollment",
+        StudentCourseRequest.source == "presentation",
+    ).delete()
+
     requests: list[StudentCourseRequest] = []
-    for index, course_id in enumerate(payload.course_ids, start=1):
-        course = db.get(Course, course_id)
-        if not course:
-            raise HTTPException(status_code=404, detail="Cadeira nao encontrada")
-        if not course_eligible_for_student(db, student, course):
-            continue
-        request = StudentCourseRequest(
-            student_id=student.id,
-            course_id=course.id,
-            target_semester=presentation_token.semester,
-            priority=max(1, 5 - index + 1),
-            preference_order=index,
-            alternative_group="fila-apresentacao" if payload.queue_mode else f"course:{course.id}",
-            stage="pre_enrollment",
-            source="presentation",
-            note="Escolha enviada por QR Code da apresentacao",
-        )
-        db.add(request)
-        requests.append(request)
+    if payload.branches:
+        for branch in sorted(payload.branches, key=lambda item: item.preference_order):
+            for item_index, item in enumerate(branch.items, start=1):
+                course = db.get(Course, item.course_id)
+                if not course:
+                    raise HTTPException(status_code=404, detail="Cadeira nao encontrada")
+                if not course_eligible_for_student(db, student, course):
+                    continue
+                request = StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=course.id,
+                    target_semester=presentation_token.semester,
+                    priority=item.priority if item.priority is not None else branch.priority,
+                    preference_order=branch.preference_order,
+                    alternative_group="fila-apresentacao-complexa",
+                    desired_day=item.desired_day,
+                    desired_start_minute=item.desired_start_minute,
+                    desired_end_minute=item.desired_end_minute,
+                    time_preference_strength=item.time_preference_strength,
+                    stage="pre_enrollment",
+                    source="presentation",
+                    note=presentation_plan_note(branch.label, item.note, item_index),
+                )
+                db.add(request)
+                requests.append(request)
+    else:
+        for index, course_id in enumerate(payload.course_ids, start=1):
+            course = db.get(Course, course_id)
+            if not course:
+                raise HTTPException(status_code=404, detail="Cadeira nao encontrada")
+            if not course_eligible_for_student(db, student, course):
+                continue
+            request = StudentCourseRequest(
+                student_id=student.id,
+                course_id=course.id,
+                target_semester=presentation_token.semester,
+                priority=max(1, 5 - index + 1),
+                preference_order=index,
+                alternative_group="fila-apresentacao" if payload.queue_mode else f"course:{course.id}",
+                stage="pre_enrollment",
+                source="presentation",
+                note="Escolha enviada por QR Code da apresentacao",
+            )
+            db.add(request)
+            requests.append(request)
     if not requests:
         raise HTTPException(status_code=422, detail="Nenhuma cadeira elegivel foi enviada")
     db.commit()
     for request in requests:
         db.refresh(request)
     return {"requests": requests}
+
+
+def presentation_plan_note(branch_label: str | None, item_note: str | None, item_index: int) -> str:
+    parts = [part for part in (branch_label, item_note) if part]
+    if parts:
+        return " | ".join(parts)
+    return f"Item {item_index} do plano enviado por QR Code"
 
 
 def first_professor(db: Session) -> Professor | None:

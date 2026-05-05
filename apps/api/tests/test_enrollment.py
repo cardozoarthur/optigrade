@@ -611,3 +611,184 @@ def test_solver_selected_alternatives_drive_automatic_enrollment(db_session) -> 
         "Opcao anterior substituida pela escolha otimizada do solver",
         "Opcao anterior substituida pela escolha otimizada do solver",
     ]
+
+
+def test_enrollment_allocates_whole_complex_branch_and_checks_requested_time(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    algebra = Course(
+        name="Algebra Linear",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    geometry = Course(
+        name="Geometria Analitica",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    physics = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    student = Student(name="Aluno complexo", degree_program_id=program.id, current_semester=2)
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=30, kind=RoomKind.lecture)
+    monday = TimeSlot(day=0, start_minute=19 * 60, end_minute=21 * 60, label="Seg 19-21")
+    tuesday = TimeSlot(day=1, start_minute=8 * 60, end_minute=10 * 60, label="Ter 08-10")
+    wednesday = TimeSlot(day=2, start_minute=8 * 60, end_minute=10 * 60, label="Qua 08-10")
+    friday = TimeSlot(day=4, start_minute=8 * 60, end_minute=10 * 60, label="Sex 08-10")
+    run = OptimizationRun(
+        metrics={
+            "student_demand_plan": {"selected_request_ids": []},
+            "planned_sections": [],
+        }
+    )
+    db_session.add_all(
+        [
+            calculus,
+            algebra,
+            geometry,
+            physics,
+            student,
+            professor,
+            room,
+            monday,
+            tuesday,
+            wednesday,
+            friday,
+            run,
+        ]
+    )
+    db_session.flush()
+    branch_one = StudentCourseRequest(
+        student_id=student.id,
+        course_id=calculus.id,
+        target_semester="2026/2",
+        priority=5,
+        preference_order=1,
+        alternative_group="trajetoria",
+        desired_day=0,
+        desired_start_minute=19 * 60,
+        desired_end_minute=21 * 60,
+    )
+    branch_two = [
+        StudentCourseRequest(
+            student_id=student.id,
+            course_id=algebra.id,
+            target_semester="2026/2",
+            priority=4,
+            preference_order=2,
+            alternative_group="trajetoria",
+            desired_day=1,
+            desired_start_minute=8 * 60,
+            desired_end_minute=10 * 60,
+        ),
+        StudentCourseRequest(
+            student_id=student.id,
+            course_id=geometry.id,
+            target_semester="2026/2",
+            priority=4,
+            preference_order=2,
+            alternative_group="trajetoria",
+            desired_day=2,
+            desired_start_minute=8 * 60,
+            desired_end_minute=10 * 60,
+        ),
+        StudentCourseRequest(
+            student_id=student.id,
+            course_id=physics.id,
+            target_semester="2026/2",
+            priority=4,
+            preference_order=2,
+            alternative_group="trajetoria",
+            desired_day=4,
+            desired_start_minute=8 * 60,
+            desired_end_minute=10 * 60,
+        ),
+    ]
+    db_session.add(branch_one)
+    db_session.add_all(branch_two)
+    db_session.flush()
+    run.metrics = {
+        "student_demand_plan": {
+            "selected_request_ids": [request.id for request in branch_two],
+        },
+        "planned_sections": [
+            {"db_course_id": algebra.id, "section_index": 0, "planned_students": 1},
+            {"db_course_id": geometry.id, "section_index": 0, "planned_students": 1},
+            {"db_course_id": physics.id, "section_index": 0, "planned_students": 1},
+        ],
+    }
+    db_session.add_all(
+        [
+            Assignment(
+                run_id=run.id,
+                course_id=calculus.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=wednesday.id,
+            ),
+            Assignment(
+                run_id=run.id,
+                course_id=algebra.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=tuesday.id,
+            ),
+            Assignment(
+                run_id=run.id,
+                course_id=geometry.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=wednesday.id,
+            ),
+            Assignment(
+                run_id=run.id,
+                course_id=physics.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=friday.id,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    summary = run_enrollment_round(db_session, "2026/2", run_id=run.id)
+    enrollments = db_session.query(StudentEnrollment).all()
+    enrolled_course_ids = {
+        enrollment.course_id for enrollment in enrollments if enrollment.status == "enrolled"
+    }
+    superseded_course_ids = {
+        enrollment.course_id for enrollment in enrollments if enrollment.status == "superseded"
+    }
+
+    assert summary["enrolled"] == 3
+    assert summary["superseded"] == 1
+    assert summary["solver_planned_allocations"] == 3
+    assert enrolled_course_ids == {algebra.id, geometry.id, physics.id}
+    assert superseded_course_ids == {calculus.id}

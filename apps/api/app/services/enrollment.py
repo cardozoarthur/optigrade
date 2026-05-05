@@ -17,6 +17,7 @@ from app.models.entities import (
     StudentCourseRequest,
     StudentCourseStatus,
     StudentEnrollment,
+    TimeSlot,
 )
 from app.services.student_planning import (
     completed_contexts_by_course,
@@ -73,6 +74,11 @@ def run_enrollment_round(
     )
     capacity_plan = course_capacity_plan(db, run_id)
     capacity_by_course = capacity_plan.capacity_by_course
+    assignment_windows = (
+        assignment_windows_by_bucket(db, run_id, capacity_plan.bucket_by_course)
+        if run_id
+        else None
+    )
     used_by_bucket = {bucket_id: 0 for bucket_id in capacity_plan.capacity_by_bucket}
     candidates_by_group: dict[tuple[str, str], list[EnrollmentCandidate]] = {}
     blocked = 0
@@ -104,54 +110,59 @@ def run_enrollment_round(
             EnrollmentCandidate(request, student, course, eligibility_course, score, breakdown)
         )
 
-    allocated_by_group: dict[tuple[str, str], EnrollmentCandidate] = {}
+    branches_by_group = candidate_branches_by_group(candidates_by_group)
+    allocated_by_group: dict[tuple[str, str], list[EnrollmentCandidate]] = {}
     solver_planned_request_ids = planned_request_ids_for_run(db, run_id)
     solver_planned_allocations = 0
     if solver_planned_request_ids:
-        for group, values in candidates_by_group.items():
+        for group, branches in branches_by_group.items():
             planned = next(
-                (candidate for candidate in values if candidate.request.id in solver_planned_request_ids),
+                (
+                    branch
+                    for branch in branches.values()
+                    if {candidate.request.id for candidate in branch} <= solver_planned_request_ids
+                ),
                 None,
             )
             if not planned:
                 continue
-            if candidate_has_capacity(planned, capacity_plan, used_by_bucket, capacity_by_course):
+            if branch_has_capacity(planned, capacity_plan, used_by_bucket, capacity_by_course, assignment_windows):
                 allocated_by_group[group] = planned
-                reserve_candidate_capacity(planned, capacity_plan, used_by_bucket)
-                solver_planned_allocations += 1
+                reserve_branch_capacity(planned, capacity_plan, used_by_bucket)
+                solver_planned_allocations += len(planned)
 
     max_order = max(
-        (candidate.request.preference_order for values in candidates_by_group.values() for candidate in values),
+        (
+            preference_order
+            for branches in branches_by_group.values()
+            for preference_order in branches
+        ),
         default=0,
     )
     for preference_order in range(1, max_order + 1):
-        round_candidates = [
-            candidate
-            for group, values in candidates_by_group.items()
+        round_branches = [
+            (group, branch)
+            for group, branches in branches_by_group.items()
             if group not in allocated_by_group
-            for candidate in values
-            if candidate.request.preference_order == preference_order
+            for branch_order, branch in branches.items()
+            if branch_order == preference_order
         ]
-        round_candidates.sort(
+        round_branches.sort(
             key=lambda item: (
-                -item.score,
-                item.request.preference_order,
-                -item.request.priority,
-                item.student.current_semester,
-                item.student.registration_number or item.student.name,
+                -branch_score(item[1]),
+                branch_preference_order(item[1]),
+                -branch_priority(item[1]),
+                item[1][0].student.current_semester,
+                item[1][0].student.registration_number or item[1][0].student.name,
             )
         )
-        for candidate in round_candidates:
-            group = (
-                candidate.student.id,
-                candidate.request.alternative_group or f"course:{candidate.course.id}",
-            )
+        for group, branch in round_branches:
             if group in allocated_by_group:
                 continue
-            if not candidate_has_capacity(candidate, capacity_plan, used_by_bucket, capacity_by_course):
+            if not branch_has_capacity(branch, capacity_plan, used_by_bucket, capacity_by_course, assignment_windows):
                 continue
-            allocated_by_group[group] = candidate
-            reserve_candidate_capacity(candidate, capacity_plan, used_by_bucket)
+            allocated_by_group[group] = branch
+            reserve_branch_capacity(branch, capacity_plan, used_by_bucket)
 
     enrolled = 0
     waitlisted = 0
@@ -160,8 +171,12 @@ def run_enrollment_round(
     waitlisted_by_course: dict[str, int] = {}
     for group, values in candidates_by_group.items():
         allocated = allocated_by_group.get(group)
+        allocated_request_ids = {
+            candidate.request.id for candidate in allocated
+        } if allocated else set()
+        allocated_order = branch_preference_order(allocated) if allocated else None
         for candidate in values:
-            if allocated and candidate.request.id == allocated.request.id:
+            if candidate.request.id in allocated_request_ids:
                 enrolled += 1
                 enrolled_by_course[candidate.course.id] = (
                     enrolled_by_course.get(candidate.course.id, 0) + 1
@@ -173,7 +188,8 @@ def run_enrollment_round(
                 status = EnrollmentStatus.superseded.value
                 reason = (
                     "Opcao anterior substituida pela escolha otimizada do solver"
-                    if candidate.request.preference_order < allocated.request.preference_order
+                    if allocated_order is not None
+                    and candidate.request.preference_order < allocated_order
                     else "Alternativa posterior descartada porque uma opcao anterior foi alocada"
                 )
             else:
@@ -219,13 +235,78 @@ def course_capacity_by_id(db: Session, run_id: str | None) -> dict[str, int]:
     return course_capacity_plan(db, run_id).capacity_by_course
 
 
+def candidate_branches_by_group(
+    candidates_by_group: dict[tuple[str, str], list[EnrollmentCandidate]],
+) -> dict[tuple[str, str], dict[int, list[EnrollmentCandidate]]]:
+    grouped: dict[tuple[str, str], dict[int, list[EnrollmentCandidate]]] = {}
+    for group, candidates in candidates_by_group.items():
+        branches = grouped.setdefault(group, {})
+        for candidate in candidates:
+            branches.setdefault(candidate.request.preference_order, []).append(candidate)
+        for branch in branches.values():
+            branch.sort(key=lambda item: (item.request.created_at, item.course.name))
+    return grouped
+
+
+def branch_has_capacity(
+    branch: list[EnrollmentCandidate],
+    capacity_plan: EnrollmentCapacityPlan,
+    used_by_bucket: dict[str, int],
+    capacity_by_course: dict[str, int],
+    assignment_windows: dict[str, list[tuple[int, int, int]]] | None = None,
+) -> bool:
+    simulated_usage = dict(used_by_bucket)
+    for candidate in branch:
+        if not candidate_has_capacity(
+            candidate,
+            capacity_plan,
+            simulated_usage,
+            capacity_by_course,
+            assignment_windows,
+        ):
+            return False
+        reserve_candidate_capacity(candidate, capacity_plan, simulated_usage)
+    return True
+
+
+def reserve_branch_capacity(
+    branch: list[EnrollmentCandidate],
+    capacity_plan: EnrollmentCapacityPlan,
+    used_by_bucket: dict[str, int],
+) -> None:
+    for candidate in branch:
+        reserve_candidate_capacity(candidate, capacity_plan, used_by_bucket)
+
+
+def branch_score(branch: list[EnrollmentCandidate]) -> float:
+    return sum(candidate.score for candidate in branch)
+
+
+def branch_priority(branch: list[EnrollmentCandidate]) -> float:
+    if not branch:
+        return 0
+    return sum(candidate.request.priority for candidate in branch) / len(branch)
+
+
+def branch_preference_order(branch: list[EnrollmentCandidate] | None) -> int | None:
+    if not branch:
+        return None
+    return min(candidate.request.preference_order for candidate in branch)
+
+
 def candidate_has_capacity(
     candidate: EnrollmentCandidate,
     capacity_plan: EnrollmentCapacityPlan,
     used_by_bucket: dict[str, int],
     capacity_by_course: dict[str, int],
+    assignment_windows: dict[str, list[tuple[int, int, int]]] | None = None,
 ) -> bool:
     bucket_id = capacity_plan.bucket_by_course.get(candidate.course.id, candidate.course.id)
+    if assignment_windows is not None and not request_time_is_scheduled(
+        candidate.request,
+        assignment_windows.get(bucket_id, []),
+    ):
+        return False
     capacity = capacity_plan.capacity_by_bucket.get(
         bucket_id,
         capacity_by_course.get(candidate.course.id, candidate.course.expected_demand),
@@ -253,6 +334,67 @@ def planned_request_ids_for_run(db: Session, run_id: str | None) -> set[str]:
     if not isinstance(request_ids, list):
         return set()
     return {request_id for request_id in request_ids if isinstance(request_id, str)}
+
+
+def assignment_windows_by_bucket(
+    db: Session,
+    run_id: str | None,
+    bucket_by_course: dict[str, str],
+) -> dict[str, list[tuple[int, int, int]]]:
+    if not run_id:
+        return {}
+    rows = (
+        db.query(Assignment.course_id, TimeSlot.day, TimeSlot.start_minute, TimeSlot.end_minute)
+        .join(TimeSlot, TimeSlot.id == Assignment.time_slot_id)
+        .filter(Assignment.run_id == run_id)
+        .all()
+    )
+    windows: dict[str, list[tuple[int, int, int]]] = {}
+    for course_id, day, start_minute, end_minute in rows:
+        bucket_id = bucket_by_course.get(course_id, f"course:{course_id}")
+        windows.setdefault(bucket_id, []).append((int(day), int(start_minute), int(end_minute)))
+    return windows
+
+
+def request_time_is_scheduled(
+    request: StudentCourseRequest,
+    assignment_windows: list[tuple[int, int, int]],
+) -> bool:
+    if (
+        request.desired_day is None
+        or request.desired_start_minute is None
+        or request.desired_end_minute is None
+    ):
+        return True
+    return any(
+        time_window_matches_request(
+            request.desired_day,
+            request.desired_start_minute,
+            request.desired_end_minute,
+            day,
+            start_minute,
+            end_minute,
+        )
+        for day, start_minute, end_minute in assignment_windows
+    )
+
+
+def time_window_matches_request(
+    desired_day: int,
+    desired_start_minute: int,
+    desired_end_minute: int,
+    day: int,
+    start_minute: int,
+    end_minute: int,
+) -> bool:
+    if desired_day != day:
+        return False
+    overlap = min(desired_end_minute, end_minute) - max(desired_start_minute, start_minute)
+    if overlap <= 0:
+        return False
+    slot_duration = end_minute - start_minute
+    desired_duration = desired_end_minute - desired_start_minute
+    return overlap >= min(slot_duration, desired_duration) * 0.95 and overlap >= 60
 
 
 def course_capacity_plan(db: Session, run_id: str | None) -> EnrollmentCapacityPlan:

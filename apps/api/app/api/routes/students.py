@@ -5,6 +5,7 @@ from app.db.session import get_db
 from app.models.entities import (
     Course,
     CourseRestriction,
+    ConstraintStrength,
     DegreeProgram,
     Student,
     StudentCourseHistory,
@@ -18,6 +19,7 @@ from app.schemas import (
     StudentCourseChoiceSelectionCreate,
     StudentCourseHistoryCreate,
     StudentCourseHistoryRead,
+    StudentCoursePlanCreate,
     StudentCourseRequestCreate,
     StudentCourseRequestRead,
     StudentCourseSelectionCreate,
@@ -156,6 +158,7 @@ def select_student_courses(
         request.priority = payload.priority
         request.preference_order = index
         request.alternative_group = alternative_group
+        apply_request_time_fields(request, payload)
         request.stage = "pre_enrollment"
         request.note = payload.note
         request.source = "student"
@@ -195,11 +198,49 @@ def select_student_course_choices(
         )
         request.priority = item.priority
         request.preference_order = item.preference_order
+        apply_request_time_fields(request, item)
         request.stage = "pre_enrollment"
         request.note = item.note
         request.source = "student"
         db.add(request)
         requests.append(request)
+    db.commit()
+    for request in requests:
+        db.refresh(request)
+    return requests
+
+
+@router.post("/students/{student_id}/course-requests/plan", response_model=list[StudentCourseRequestRead])
+def submit_complex_student_course_plan(
+    student_id: str, payload: StudentCoursePlanCreate, db: Session = Depends(get_db)
+) -> list[StudentCourseRequest]:
+    student = require_student(db, student_id)
+    db.query(StudentCourseRequest).filter(
+        StudentCourseRequest.student_id == student_id,
+        StudentCourseRequest.target_semester == payload.target_semester,
+        StudentCourseRequest.alternative_group == payload.alternative_group,
+        StudentCourseRequest.stage == payload.stage,
+    ).delete()
+
+    requests: list[StudentCourseRequest] = []
+    for branch in sorted(payload.branches, key=lambda item: item.preference_order):
+        for item_index, item in enumerate(branch.items, start=1):
+            course = require_course(db, item.course_id)
+            validate_student_course(db, student, course)
+            request = StudentCourseRequest(
+                student_id=student_id,
+                course_id=item.course_id,
+                target_semester=payload.target_semester,
+                priority=item.priority if item.priority is not None else branch.priority,
+                preference_order=branch.preference_order,
+                alternative_group=payload.alternative_group,
+                stage=payload.stage,
+                source=payload.source,
+                note=complex_plan_item_note(branch.label, item.note, item_index),
+            )
+            apply_request_time_fields(request, item)
+            db.add(request)
+            requests.append(request)
     db.commit()
     for request in requests:
         db.refresh(request)
@@ -353,3 +394,19 @@ def validate_student_course(db: Session, student: Student, course: Course) -> No
         if equivalent:
             return
     raise HTTPException(status_code=422, detail="Cadeira nao pertence ao curso do aluno")
+
+
+def apply_request_time_fields(request: StudentCourseRequest, payload: object) -> None:
+    request.desired_day = getattr(payload, "desired_day", None)
+    request.desired_start_minute = getattr(payload, "desired_start_minute", None)
+    request.desired_end_minute = getattr(payload, "desired_end_minute", None)
+    request.time_preference_strength = (
+        getattr(payload, "time_preference_strength", None) or ConstraintStrength.soft
+    )
+
+
+def complex_plan_item_note(branch_label: str | None, item_note: str | None, item_index: int) -> str:
+    parts = [part for part in (branch_label, item_note) if part]
+    if parts:
+        return " | ".join(parts)
+    return f"Item {item_index} do pacote de preferencias"

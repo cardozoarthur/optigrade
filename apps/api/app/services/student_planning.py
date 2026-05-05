@@ -41,8 +41,20 @@ class DemandChoice:
 
 
 @dataclass(frozen=True)
+class DemandChoiceBundle:
+    group: tuple[str, str]
+    preference_order: int
+    choices: tuple[DemandChoice, ...]
+
+    @property
+    def request_ids(self) -> tuple[str, ...]:
+        return tuple(choice.request.id for choice in self.choices)
+
+
+@dataclass(frozen=True)
 class StudentDemandChoiceSummary:
     choices_by_group: dict[tuple[str, str], tuple[DemandChoice, ...]]
+    bundles_by_group: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]]
     first_choice_demand_by_course: dict[str, int]
     all_eligible_demand_by_course: dict[str, int]
     total_requests: int
@@ -54,7 +66,7 @@ class StudentDemandChoiceSummary:
 
     @property
     def choice_groups(self) -> int:
-        return len(self.choices_by_group)
+        return len(self.bundles_by_group)
 
 
 def student_demand_by_course(db: Session, semester: str) -> dict[str, int]:
@@ -81,7 +93,7 @@ def student_demand_choice_summary(db: Session, semester: str) -> StudentDemandCh
         .all()
     )
     if not requests:
-        return StudentDemandChoiceSummary({}, {}, {}, 0, 0, 0, 0, 0, 0)
+        return StudentDemandChoiceSummary({}, {}, {}, {}, 0, 0, 0, 0, 0, 0)
 
     student_ids = {item.student_id for item in requests}
     course_ids = {item.course_id for item in requests}
@@ -185,17 +197,43 @@ def student_demand_choice_summary(db: Session, semester: str) -> StudentDemandCh
         )
         for group, choices in choices_by_group.items()
     }
-    first_choice_demand: dict[str, int] = {}
-    for choices in ordered_by_group.values():
-        if not choices:
-            continue
-        choice = choices[0]
-        first_choice_demand[choice.demand_course.id] = (
-            first_choice_demand.get(choice.demand_course.id, 0) + 1
+    bundles_by_group = {
+        group: tuple(
+            DemandChoiceBundle(
+                group=group,
+                preference_order=preference_order,
+                choices=tuple(
+                    sorted(
+                        branch_choices,
+                        key=lambda item: (
+                            -item.request.priority,
+                            item.request.created_at,
+                            item.demand_course.name,
+                        ),
+                    )
+                ),
+            )
+            for preference_order, branch_choices in sorted(
+                choices_by_branch.items(), key=lambda item: item[0]
+            )
         )
+        for group, choices in ordered_by_group.items()
+        if (
+            choices_by_branch := group_choices_by_preference_order(choices)
+        )
+    }
+    first_choice_demand: dict[str, int] = {}
+    for bundles in bundles_by_group.values():
+        if not bundles:
+            continue
+        for choice in bundles[0].choices:
+            first_choice_demand[choice.demand_course.id] = (
+                first_choice_demand.get(choice.demand_course.id, 0) + 1
+            )
 
     return StudentDemandChoiceSummary(
         choices_by_group=ordered_by_group,
+        bundles_by_group=bundles_by_group,
         first_choice_demand_by_course=first_choice_demand,
         all_eligible_demand_by_course=all_eligible_demand,
         total_requests=len(requests),
@@ -212,6 +250,23 @@ def demand_from_allocations(choices: Iterable[DemandChoice]) -> dict[str, int]:
     for choice in choices:
         demand[choice.demand_course.id] = demand.get(choice.demand_course.id, 0) + 1
     return demand
+
+
+def demand_from_bundle_allocations(bundles: Iterable[DemandChoiceBundle]) -> dict[str, int]:
+    demand: dict[str, int] = {}
+    for bundle in bundles:
+        for choice in bundle.choices:
+            demand[choice.demand_course.id] = demand.get(choice.demand_course.id, 0) + 1
+    return demand
+
+
+def group_choices_by_preference_order(
+    choices: tuple[DemandChoice, ...],
+) -> dict[int, list[DemandChoice]]:
+    grouped: dict[int, list[DemandChoice]] = {}
+    for choice in choices:
+        grouped.setdefault(choice.request.preference_order, []).append(choice)
+    return grouped
 
 
 def eligibility_course_for_student_cached(

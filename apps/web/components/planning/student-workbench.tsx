@@ -2,9 +2,50 @@
 
 import React, { FormEvent, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { CalendarCheck, Check, CircleAlert, ClipboardCheck, Clock3, GraduationCap, Loader2, Send, Sparkles } from "lucide-react";
+import {
+  CalendarCheck,
+  Check,
+  CircleAlert,
+  ClipboardCheck,
+  Clock3,
+  GraduationCap,
+  Loader2,
+  Plus,
+  Send,
+  Sparkles,
+  Trash2
+} from "lucide-react";
 import { Course, Student, StudentCourseSuggestion, StudentEnrollment, StudentSuggestions, api } from "@/lib/api";
-import { Field, Panel, PrimaryButton, inputClass } from "@/components/ui";
+import { Field, IconButton, Panel, PrimaryButton, inputClass } from "@/components/ui";
+
+type SelectionMode = "independent" | "queue" | "complex";
+type TimePreferenceStrength = "hard" | "soft" | "manual_override";
+
+type PlanItemDraft = {
+  id: string;
+  courseId: string;
+  day: string;
+  start: string;
+  end: string;
+  strength: TimePreferenceStrength;
+  note: string;
+};
+
+type PlanBranchDraft = {
+  id: string;
+  label: string;
+  priority: number;
+  items: PlanItemDraft[];
+};
+
+const weekDays = [
+  { value: "0", label: "Segunda" },
+  { value: "1", label: "Terça" },
+  { value: "2", label: "Quarta" },
+  { value: "3", label: "Quinta" },
+  { value: "4", label: "Sexta" },
+  { value: "5", label: "Sábado" }
+];
 
 export function StudentWorkbench({
   studentId,
@@ -20,23 +61,36 @@ export function StudentWorkbench({
   const [enrollments, setEnrollments] = useState<StudentEnrollment[]>([]);
   const [selectedStudentId, setSelectedStudentId] = useState(studentId ?? "");
   const [targetSemester, setTargetSemester] = useState(semester);
-  const [selectionMode, setSelectionMode] = useState<"independent" | "queue">("independent");
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>("independent");
   const [suggestions, setSuggestions] = useState<StudentSuggestions | null>(null);
   const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
+  const [complexBranches, setComplexBranches] = useState<PlanBranchDraft[]>(() => defaultComplexBranches());
+  const [activeBranchId, setActiveBranchId] = useState("");
   const [busy, setBusy] = useState(false);
   const [enrollmentsLoading, setEnrollmentsLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const courseById = useMemo(() => Object.fromEntries(courses.map((course) => [course.id, course])), [courses]);
+  const suggestionItems = useMemo(() => suggestions?.suggestions ?? [], [suggestions]);
+  const eligibleCourseIds = useMemo(
+    () => new Set(suggestionItems.filter((item) => item.eligible).map((item) => item.course.id)),
+    [suggestionItems]
+  );
+  const complexCourseIds = useMemo(
+    () => Array.from(new Set(complexBranches.flatMap((branch) => branch.items.map((item) => item.courseId)))),
+    [complexBranches]
+  );
+  const activeBranch = complexBranches.find((branch) => branch.id === activeBranchId) ?? complexBranches[0];
+  const activeBranchCourseIds = activeBranch?.items.map((item) => item.courseId) ?? [];
+  const visibleSelectedCourseIds = selectionMode === "complex" ? complexCourseIds : selectedCourseIds;
   const selectedStudent = useMemo(
     () => students.find((student) => student.id === selectedStudentId),
     [students, selectedStudentId]
   );
-  const suggestionItems = suggestions?.suggestions ?? [];
   const selectedItems = useMemo(
-    () => suggestionItems.filter((item) => selectedCourseIds.includes(item.course.id)),
-    [selectedCourseIds, suggestionItems]
+    () => suggestionItems.filter((item) => visibleSelectedCourseIds.includes(item.course.id)),
+    [visibleSelectedCourseIds, suggestionItems]
   );
   const regularItems = useMemo(
     () => suggestionItems.filter((item) => item.is_regular_for_student),
@@ -44,10 +98,14 @@ export function StudentWorkbench({
   );
   const selectedRegularItems = selectedItems.filter((item) => item.is_regular_for_student);
   const missingRegularItems = regularItems.filter(
-    (item) => item.eligible && !selectedCourseIds.includes(item.course.id)
+    (item) => item.eligible && !visibleSelectedCourseIds.includes(item.course.id)
   );
   const blockedSelectedItems = selectedItems.filter((item) => !item.eligible);
   const eligibleSelectedItems = selectedItems.filter((item) => item.eligible);
+  const validComplexBranches = useMemo(
+    () => buildComplexPlanBranches(complexBranches, eligibleCourseIds).branches,
+    [complexBranches, eligibleCourseIds]
+  );
 
   useEffect(() => {
     async function load() {
@@ -67,6 +125,12 @@ export function StudentWorkbench({
     loadEnrollments().catch((reason: unknown) => setError(String(reason)));
   }, [selectedStudentId, targetSemester]);
 
+  useEffect(() => {
+    if (!activeBranchId && complexBranches[0]) {
+      setActiveBranchId(complexBranches[0].id);
+    }
+  }, [activeBranchId, complexBranches]);
+
   async function loadSuggestions(nextStudentId = selectedStudentId, preserveStatus = false) {
     if (!nextStudentId) return;
     setBusy(true);
@@ -81,6 +145,11 @@ export function StudentWorkbench({
         data.suggestions
           .filter((item) => item.already_requested)
           .map((item) => item.course.id)
+      );
+      setComplexBranches((current) =>
+        current.some((branch) => branch.items.length)
+          ? current
+          : seedComplexBranchesFromSuggestions(data.suggestions)
       );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -107,11 +176,28 @@ export function StudentWorkbench({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedStudentId || eligibleSelectedItems.length === 0) return;
+    if (!selectedStudentId) return;
+    if (selectionMode !== "complex" && eligibleSelectedItems.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      if (selectionMode === "queue") {
+      if (selectionMode === "complex") {
+        const plan = buildComplexPlanBranches(complexBranches, eligibleCourseIds);
+        if (plan.error || !plan.branches.length) {
+          setError(plan.error ?? "Adicione ao menos uma cadeira elegível ao plano.");
+          return;
+        }
+        await api(`/students/${selectedStudentId}/course-requests/plan`, {
+          method: "POST",
+          body: JSON.stringify({
+            target_semester: targetSemester,
+            alternative_group: "trajetoria-principal",
+            branches: plan.branches,
+            stage: "pre_enrollment",
+            source: "student"
+          })
+        });
+      } else if (selectionMode === "queue") {
         await api(`/students/${selectedStudentId}/course-requests/choices`, {
           method: "POST",
           body: JSON.stringify({
@@ -147,8 +233,81 @@ export function StudentWorkbench({
   }
 
   function toggleCourse(courseId: string) {
+    if (selectionMode === "complex") {
+      toggleCourseInActiveBranch(courseId);
+      return;
+    }
     setSelectedCourseIds((current) =>
       current.includes(courseId) ? current.filter((item) => item !== courseId) : [...current, courseId]
+    );
+  }
+
+  function toggleCourseInActiveBranch(courseId: string) {
+    const branchId = activeBranch?.id ?? complexBranches[0]?.id;
+    if (!branchId) return;
+    setComplexBranches((current) =>
+      current.map((branch) => {
+        if (branch.id !== branchId) return branch;
+        if (branch.items.some((item) => item.courseId === courseId)) {
+          return { ...branch, items: branch.items.filter((item) => item.courseId !== courseId) };
+        }
+        return { ...branch, items: [...branch.items, createPlanItem(courseId)] };
+      })
+    );
+  }
+
+  function addBranchItem(branchId: string) {
+    const defaultCourseId = suggestionItems.find((item) => item.eligible)?.course.id ?? "";
+    setComplexBranches((current) =>
+      current.map((branch) =>
+        branch.id === branchId
+          ? { ...branch, items: [...branch.items, createPlanItem(defaultCourseId)] }
+          : branch
+      )
+    );
+  }
+
+  function updateBranch(branchId: string, patch: Partial<PlanBranchDraft>) {
+    setComplexBranches((current) =>
+      current.map((branch) => (branch.id === branchId ? { ...branch, ...patch } : branch))
+    );
+  }
+
+  function addBranch() {
+    const nextBranch = createPlanBranch(`Caminho ${complexBranches.length + 1}`, Math.max(1, 5 - complexBranches.length));
+    setComplexBranches((current) => [...current, nextBranch]);
+    setActiveBranchId(nextBranch.id);
+  }
+
+  function removeBranch(branchId: string) {
+    if (complexBranches.length <= 1) return;
+    const nextActiveBranch = complexBranches.find((branch) => branch.id !== branchId);
+    setComplexBranches((current) => current.filter((branch) => branch.id !== branchId));
+    if (activeBranchId === branchId) {
+      setActiveBranchId(nextActiveBranch?.id ?? "");
+    }
+  }
+
+  function updateBranchItem(branchId: string, itemId: string, patch: Partial<PlanItemDraft>) {
+    setComplexBranches((current) =>
+      current.map((branch) =>
+        branch.id === branchId
+          ? {
+              ...branch,
+              items: branch.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
+            }
+          : branch
+      )
+    );
+  }
+
+  function removeBranchItem(branchId: string, itemId: string) {
+    setComplexBranches((current) =>
+      current.map((branch) =>
+        branch.id === branchId
+          ? { ...branch, items: branch.items.filter((item) => item.id !== itemId) }
+          : branch
+      )
     );
   }
 
@@ -210,10 +369,11 @@ export function StudentWorkbench({
               <select
                 className={inputClass}
                 value={selectionMode}
-                onChange={(event) => setSelectionMode(event.target.value as "independent" | "queue")}
+                onChange={(event) => setSelectionMode(event.target.value as SelectionMode)}
               >
                 <option value="independent">Quero cursar todas as selecionadas</option>
                 <option value="queue">Fila: X, senao Y, senao Z</option>
+                <option value="complex">Plano complexo: pacotes condicionais</option>
               </select>
             </Field>
             <button
@@ -246,8 +406,16 @@ export function StudentWorkbench({
                 key={item.course.id}
                 course={item.course}
                 eligible={item.eligible}
-                selected={selectedCourseIds.includes(item.course.id)}
-                order={selectedCourseIds.indexOf(item.course.id) + 1}
+                selected={
+                  selectionMode === "complex"
+                    ? activeBranchCourseIds.includes(item.course.id)
+                    : selectedCourseIds.includes(item.course.id)
+                }
+                order={
+                  selectionMode === "complex"
+                    ? activeBranchCourseIds.indexOf(item.course.id) + 1
+                    : selectedCourseIds.indexOf(item.course.id) + 1
+                }
                 score={item.score}
                 relation={item.regular_relation}
                 reasons={item.reasons}
@@ -263,6 +431,23 @@ export function StudentWorkbench({
 
         </Panel>
         </div>
+
+        {suggestions && selectionMode === "complex" ? (
+          <ComplexPlanBuilder
+            branches={complexBranches}
+            activeBranchId={activeBranch?.id ?? ""}
+            courses={suggestionItems.filter((item) => item.eligible).map((item) => item.course)}
+            courseById={courseById}
+            validBranchCount={validComplexBranches.length}
+            onActiveBranchChange={setActiveBranchId}
+            onAddBranch={addBranch}
+            onRemoveBranch={removeBranch}
+            onAddItem={addBranchItem}
+            onUpdateBranch={updateBranch}
+            onUpdateItem={updateBranchItem}
+            onRemoveItem={removeBranchItem}
+          />
+        ) : null}
 
         {selectedStudentId ? (
           <EnrollmentResultsPanel
@@ -305,12 +490,21 @@ export function StudentWorkbench({
                   <p className="text-xs font-semibold uppercase text-lake">Demanda</p>
                   <h2 className="text-base font-semibold">Enviar formulário</h2>
                   <p className="mt-1 text-sm text-slate-600">
-                    {selectionMode === "queue"
-                      ? "A matricula automatica tenta a fila na ordem informada ate encontrar vaga."
-                      : "A otimizacao usa apenas escolhas elegiveis; bloqueios continuam visiveis para ajuste academico."}
+                    {selectionMode === "complex"
+                      ? `${validComplexBranches.length} caminhos condicionais prontos para o solver.`
+                      : selectionMode === "queue"
+                        ? "A matricula automatica tenta a fila na ordem informada ate encontrar vaga."
+                        : "A otimizacao usa apenas escolhas elegiveis; bloqueios continuam visiveis para ajuste academico."}
                   </p>
                 </div>
-                <PrimaryButton type="submit" disabled={!selectedStudentId || eligibleSelectedItems.length === 0 || busy}>
+                <PrimaryButton
+                  type="submit"
+                  disabled={
+                    !selectedStudentId ||
+                    busy ||
+                    (selectionMode === "complex" ? validComplexBranches.length === 0 : eligibleSelectedItems.length === 0)
+                  }
+                >
                   <span className="inline-flex items-center gap-2">
                     {busy ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
                     Enviar escolhas
@@ -322,6 +516,201 @@ export function StudentWorkbench({
         ) : null}
       </form>
     </div>
+  );
+}
+
+function ComplexPlanBuilder({
+  branches,
+  activeBranchId,
+  courses,
+  courseById,
+  validBranchCount,
+  onActiveBranchChange,
+  onAddBranch,
+  onRemoveBranch,
+  onAddItem,
+  onUpdateBranch,
+  onUpdateItem,
+  onRemoveItem
+}: {
+  branches: PlanBranchDraft[];
+  activeBranchId: string;
+  courses: Course[];
+  courseById: Record<string, Course>;
+  validBranchCount: number;
+  onActiveBranchChange: (branchId: string) => void;
+  onAddBranch: () => void;
+  onRemoveBranch: (branchId: string) => void;
+  onAddItem: (branchId: string) => void;
+  onUpdateBranch: (branchId: string, patch: Partial<PlanBranchDraft>) => void;
+  onUpdateItem: (branchId: string, itemId: string, patch: Partial<PlanItemDraft>) => void;
+  onRemoveItem: (branchId: string, itemId: string) => void;
+}) {
+  const activeBranch = branches.find((branch) => branch.id === activeBranchId) ?? branches[0];
+
+  return (
+    <Panel>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase text-lake">Plano condicional</p>
+          <h2 className="text-base font-semibold">Quero este caminho, senão aquele</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            {validBranchCount} caminhos válidos · itens do mesmo caminho entram como pacote.
+          </p>
+        </div>
+        <PrimaryButton onClick={onAddBranch}>
+          <span className="inline-flex items-center gap-2">
+            <Plus size={16} />
+            Caminho
+          </span>
+        </PrimaryButton>
+      </div>
+
+      <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+        {branches.map((branch, index) => (
+          <button
+            type="button"
+            key={branch.id}
+            onClick={() => onActiveBranchChange(branch.id)}
+            className={`h-10 shrink-0 rounded-md border px-3 text-sm font-semibold transition hover:-translate-y-0.5 ${
+              activeBranch?.id === branch.id
+                ? "border-lake bg-lake text-white shadow-panel"
+                : "border-slateLine bg-white text-ink hover:border-lake"
+            }`}
+          >
+            {index + 1}. {branch.label || "Caminho"} · {branch.items.length}
+          </button>
+        ))}
+      </div>
+
+      {activeBranch ? (
+        <motion.div layout className="mt-4 grid gap-3">
+          <div className="grid gap-3 md:grid-cols-[1fr_140px_40px]">
+            <Field label="Nome do caminho">
+              <input
+                className={inputClass}
+                value={activeBranch.label}
+                onChange={(event) => onUpdateBranch(activeBranch.id, { label: event.target.value })}
+              />
+            </Field>
+            <Field label="Prioridade">
+              <input
+                className={inputClass}
+                type="number"
+                min={1}
+                max={5}
+                value={activeBranch.priority}
+                onChange={(event) => onUpdateBranch(activeBranch.id, { priority: Number(event.target.value) })}
+              />
+            </Field>
+            <div className="flex items-end">
+              <IconButton
+                icon={Trash2}
+                label="Remover caminho"
+                disabled={branches.length <= 1}
+                onClick={() => onRemoveBranch(activeBranch.id)}
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-2">
+            <AnimatePresence initial={false}>
+              {activeBranch.items.map((item) => (
+                <motion.div
+                  key={item.id}
+                  layout
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  className="grid gap-2 rounded-md border border-slateLine bg-slate-50 p-3 md:grid-cols-[minmax(180px,1.4fr)_120px_110px_110px_140px_40px]"
+                >
+                  <Field label="Cadeira">
+                    <select
+                      className={inputClass}
+                      value={item.courseId}
+                      onChange={(event) => onUpdateItem(activeBranch.id, item.id, { courseId: event.target.value })}
+                    >
+                      <option value="">Selecione</option>
+                      {courses.map((course) => (
+                        <option key={course.id} value={course.id}>
+                          {course.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Dia">
+                    <select
+                      className={inputClass}
+                      value={item.day}
+                      onChange={(event) => onUpdateItem(activeBranch.id, item.id, { day: event.target.value })}
+                    >
+                      <option value="">Livre</option>
+                      {weekDays.map((day) => (
+                        <option key={day.value} value={day.value}>
+                          {day.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Início">
+                    <input
+                      className={inputClass}
+                      type="time"
+                      value={item.start}
+                      onChange={(event) => onUpdateItem(activeBranch.id, item.id, { start: event.target.value })}
+                    />
+                  </Field>
+                  <Field label="Fim">
+                    <input
+                      className={inputClass}
+                      type="time"
+                      value={item.end}
+                      onChange={(event) => onUpdateItem(activeBranch.id, item.id, { end: event.target.value })}
+                    />
+                  </Field>
+                  <Field label="Força">
+                    <select
+                      className={inputClass}
+                      value={item.strength}
+                      onChange={(event) =>
+                        onUpdateItem(activeBranch.id, item.id, {
+                          strength: event.target.value as TimePreferenceStrength
+                        })
+                      }
+                    >
+                      <option value="soft">Preferência</option>
+                      <option value="hard">Forte</option>
+                      <option value="manual_override">Manual</option>
+                    </select>
+                  </Field>
+                  <div className="flex items-end">
+                    <IconButton
+                      icon={Trash2}
+                      label={`Remover ${courseById[item.courseId]?.name ?? "cadeira"}`}
+                      onClick={() => onRemoveItem(activeBranch.id, item.id)}
+                    />
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+            {!activeBranch.items.length ? (
+              <div className="rounded-md border border-dashed border-slateLine px-4 py-6 text-center text-sm text-slate-600">
+                Caminho sem cadeiras.
+              </div>
+            ) : null}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onAddItem(activeBranch.id)}
+            className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slateLine text-sm font-semibold transition hover:-translate-y-0.5 hover:border-lake hover:text-lake"
+          >
+            <Plus size={16} />
+            Adicionar cadeira ao caminho
+          </button>
+        </motion.div>
+      ) : null}
+    </Panel>
   );
 }
 
@@ -567,4 +956,119 @@ function relationLabel(relation: StudentCourseSuggestion["regular_relation"]) {
   if (relation === "elective") return "Optativa";
   if (relation === "future") return "Semestre futuro";
   return "Institucional";
+}
+
+function createDraftId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createPlanItem(courseId = "", id = createDraftId("item")): PlanItemDraft {
+  return {
+    id,
+    courseId,
+    day: "",
+    start: "",
+    end: "",
+    strength: "soft",
+    note: ""
+  };
+}
+
+function createPlanBranch(
+  label: string,
+  priority: number,
+  items: PlanItemDraft[] = [],
+  id = createDraftId("branch")
+): PlanBranchDraft {
+  return {
+    id,
+    label,
+    priority,
+    items
+  };
+}
+
+function defaultComplexBranches() {
+  return [
+    createPlanBranch("Caminho A", 5, [], "branch-default-a"),
+    createPlanBranch("Caminho B", 4, [], "branch-default-b")
+  ];
+}
+
+function seedComplexBranchesFromSuggestions(suggestions: StudentCourseSuggestion[]) {
+  const eligible = suggestions.filter((item) => item.eligible).map((item) => item.course.id);
+  if (!eligible.length) return defaultComplexBranches();
+  return [
+    createPlanBranch("Caminho A", 5, eligible.slice(0, 1).map((courseId) => createPlanItem(courseId))),
+    createPlanBranch("Caminho B", 4, eligible.slice(1, 3).map((courseId) => createPlanItem(courseId)))
+  ];
+}
+
+function buildComplexPlanBranches(
+  branches: PlanBranchDraft[],
+  eligibleCourseIds: Set<string>
+): {
+  branches: Array<{
+    preference_order: number;
+    priority: number;
+    label: string | null;
+    items: Array<{
+      course_id: string;
+      priority: number | null;
+      desired_day: number | null;
+      desired_start_minute: number | null;
+      desired_end_minute: number | null;
+      time_preference_strength: TimePreferenceStrength;
+      note: string | null;
+    }>;
+  }>;
+  error?: string;
+} {
+  const payloadBranches = [];
+  for (const [index, branch] of branches.entries()) {
+    const items = [];
+    for (const item of branch.items) {
+      if (!item.courseId || !eligibleCourseIds.has(item.courseId)) continue;
+      const time = parseOptionalTimeWindow(item);
+      if (time.error) return { branches: [], error: time.error };
+      items.push({
+        course_id: item.courseId,
+        priority: null,
+        desired_day: time.day,
+        desired_start_minute: time.start,
+        desired_end_minute: time.end,
+        time_preference_strength: item.strength,
+        note: item.note || null
+      });
+    }
+    if (items.length) {
+      payloadBranches.push({
+        preference_order: index + 1,
+        priority: branch.priority,
+        label: branch.label || null,
+        items
+      });
+    }
+  }
+  return { branches: payloadBranches };
+}
+
+function parseOptionalTimeWindow(item: PlanItemDraft) {
+  const hasAny = Boolean(item.day || item.start || item.end);
+  const hasAll = Boolean(item.day && item.start && item.end);
+  if (hasAny && !hasAll) {
+    return { error: "Preencha dia, início e fim para cada janela de horário.", day: null, start: null, end: null };
+  }
+  if (!hasAll) return { day: null, start: null, end: null };
+  const start = timeToMinutes(item.start);
+  const end = timeToMinutes(item.end);
+  if (end <= start) {
+    return { error: "O horário final deve ser posterior ao inicial.", day: null, start: null, end: null };
+  }
+  return { day: Number(item.day), start, end };
+}
+
+function timeToMinutes(value: string) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return hours * 60 + minutes;
 }

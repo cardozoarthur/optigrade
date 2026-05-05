@@ -82,9 +82,38 @@ export type StudentCourseRequest = {
   priority: number;
   preference_order: number;
   alternative_group?: string | null;
+  desired_day?: number | null;
+  desired_start_minute?: number | null;
+  desired_end_minute?: number | null;
+  time_preference_strength?: "hard" | "soft" | "manual_override";
   stage: string;
   source: string;
   note?: string | null;
+};
+
+export type StudentCoursePlanItem = {
+  course_id: string;
+  priority?: number | null;
+  desired_day?: number | null;
+  desired_start_minute?: number | null;
+  desired_end_minute?: number | null;
+  time_preference_strength?: "hard" | "soft" | "manual_override";
+  note?: string | null;
+};
+
+export type StudentCoursePlanBranch = {
+  preference_order: number;
+  priority: number;
+  label?: string | null;
+  items: StudentCoursePlanItem[];
+};
+
+export type StudentCoursePlan = {
+  target_semester: string;
+  alternative_group: string;
+  branches: StudentCoursePlanBranch[];
+  stage?: string;
+  source?: string;
 };
 
 export type StudentCourseSuggestion = {

@@ -145,7 +145,34 @@ class StudentCourseHistoryRead(StudentCourseHistoryCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
-class StudentCourseRequestCreate(BaseModel):
+class StudentCourseTimePreference(BaseModel):
+    desired_day: int | None = Field(default=None, ge=0, le=6)
+    desired_start_minute: int | None = Field(default=None, ge=0, le=1439)
+    desired_end_minute: int | None = Field(default=None, ge=1, le=1440)
+    time_preference_strength: ConstraintStrength = ConstraintStrength.soft
+
+    @model_validator(mode="after")
+    def validate_desired_window(self):
+        has_any = any(
+            value is not None
+            for value in (self.desired_day, self.desired_start_minute, self.desired_end_minute)
+        )
+        has_all = all(
+            value is not None
+            for value in (self.desired_day, self.desired_start_minute, self.desired_end_minute)
+        )
+        if has_any and not has_all:
+            raise ValueError("Dia, horario inicial e horario final desejados devem ser preenchidos juntos")
+        if (
+            self.desired_start_minute is not None
+            and self.desired_end_minute is not None
+            and self.desired_end_minute <= self.desired_start_minute
+        ):
+            raise ValueError("Horario final desejado deve ser posterior ao horario inicial")
+        return self
+
+
+class StudentCourseRequestCreate(StudentCourseTimePreference):
     course_id: str
     target_semester: str = "2026/2"
     priority: int = Field(default=3, ge=1, le=5)
@@ -171,7 +198,7 @@ class StudentCourseSelectionCreate(BaseModel):
     note: str | None = None
 
 
-class StudentCourseChoiceCreate(BaseModel):
+class StudentCourseChoiceCreate(StudentCourseTimePreference):
     course_id: str
     preference_order: int = Field(default=1, ge=1, le=50)
     alternative_group: str | None = None
@@ -182,6 +209,27 @@ class StudentCourseChoiceCreate(BaseModel):
 class StudentCourseChoiceSelectionCreate(BaseModel):
     target_semester: str = "2026/2"
     choices: list[StudentCourseChoiceCreate] = Field(min_length=1)
+
+
+class StudentCoursePlanItemCreate(StudentCourseTimePreference):
+    course_id: str
+    priority: int | None = Field(default=None, ge=1, le=5)
+    note: str | None = None
+
+
+class StudentCoursePlanBranchCreate(BaseModel):
+    preference_order: int = Field(ge=1, le=50)
+    priority: int = Field(default=3, ge=1, le=5)
+    label: str | None = Field(default=None, max_length=120)
+    items: list[StudentCoursePlanItemCreate] = Field(min_length=1, max_length=12)
+
+
+class StudentCoursePlanCreate(BaseModel):
+    target_semester: str = "2026/2"
+    alternative_group: str = Field(min_length=1, max_length=80)
+    branches: list[StudentCoursePlanBranchCreate] = Field(min_length=1, max_length=12)
+    stage: str = "pre_enrollment"
+    source: str = "student"
 
 
 class StudentCourseSuggestionRead(BaseModel):
@@ -459,8 +507,15 @@ class PresentationStudentCreatedRead(BaseModel):
 
 
 class PresentationStudentChoicesCreate(BaseModel):
-    course_ids: list[str] = Field(min_length=1, max_length=12)
+    course_ids: list[str] = Field(default_factory=list, max_length=12)
     queue_mode: bool = True
+    branches: list[StudentCoursePlanBranchCreate] | None = Field(default=None, max_length=12)
+
+    @model_validator(mode="after")
+    def validate_choices_or_branches(self):
+        if not self.course_ids and not self.branches:
+            raise ValueError("Envie ao menos uma cadeira ou um plano de preferencias")
+        return self
 
 
 class PresentationStudentChoicesRead(BaseModel):

@@ -544,6 +544,258 @@ def test_demand_solver_uses_alternatives_to_avoid_tiny_leftover_section(db_sessi
     assert snapshot.student_demand_plan["unplanned_choice_groups"] == 0
 
 
+def test_demand_solver_selects_complex_conditional_bundle_instead_of_single_course(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    algebra = Course(
+        name="Algebra Linear",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    geometry = Course(
+        name="Geometria Analitica",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    international_relations = Course(
+        name="Relacoes Internacionais",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.elective,
+        recommended_semester=4,
+        expected_demand=20,
+    )
+    elective = Course(
+        name="Topicos de Engenharia",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.elective,
+        recommended_semester=4,
+        expected_demand=20,
+    )
+    physics = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    room = Room(name="Sala regular", capacity=50, kind=RoomKind.lecture)
+    db_session.add_all([calculus, algebra, geometry, international_relations, elective, physics, room])
+    db_session.flush()
+
+    calculus_students = [
+        Student(name=f"Calculo {index:02d}", degree_program_id=program.id, current_semester=2)
+        for index in range(50)
+    ]
+    seed_students = [
+        Student(name=f"Base pacote {index}", degree_program_id=program.id, current_semester=2)
+        for index in range(3)
+    ]
+    complex_students = [
+        Student(name=f"Aluno complexo {index}", degree_program_id=program.id, current_semester=2)
+        for index in range(2)
+    ]
+    db_session.add_all([*calculus_students, *seed_students, *complex_students])
+    db_session.flush()
+    for student in calculus_students:
+        db_session.add(
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=calculus.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+        )
+    for student, course in zip(seed_students, [algebra, geometry, physics], strict=True):
+        db_session.add(
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=course.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+        )
+    branch_two_request_ids: set[str] = set()
+    for index, student in enumerate(complex_students):
+        group = f"trajetoria-{index}"
+        db_session.add_all(
+            [
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=calculus.id,
+                    target_semester="2026/2",
+                    priority=5,
+                    preference_order=1,
+                    alternative_group=group,
+                    desired_day=0,
+                    desired_start_minute=19 * 60,
+                    desired_end_minute=21 * 60,
+                ),
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=international_relations.id,
+                    target_semester="2026/2",
+                    priority=4,
+                    preference_order=1,
+                    alternative_group=group,
+                    desired_day=3,
+                    desired_start_minute=19 * 60,
+                    desired_end_minute=21 * 60,
+                ),
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=elective.id,
+                    target_semester="2026/2",
+                    priority=4,
+                    preference_order=1,
+                    alternative_group=group,
+                    desired_day=4,
+                    desired_start_minute=19 * 60,
+                    desired_end_minute=21 * 60,
+                ),
+            ]
+        )
+        branch_two = [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=algebra.id,
+                target_semester="2026/2",
+                priority=4,
+                preference_order=2,
+                alternative_group=group,
+                desired_day=1,
+                desired_start_minute=8 * 60,
+                desired_end_minute=10 * 60,
+            ),
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=geometry.id,
+                target_semester="2026/2",
+                priority=4,
+                preference_order=2,
+                alternative_group=group,
+                desired_day=2,
+                desired_start_minute=8 * 60,
+                desired_end_minute=10 * 60,
+            ),
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=physics.id,
+                target_semester="2026/2",
+                priority=4,
+                preference_order=2,
+                alternative_group=group,
+                desired_day=4,
+                desired_start_minute=8 * 60,
+                desired_end_minute=10 * 60,
+            ),
+        ]
+        db_session.add_all(branch_two)
+        db_session.flush()
+        branch_two_request_ids.update(request.id for request in branch_two)
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+    demand_by_name = {course.name: course.expected_demand for course in snapshot.courses}
+    selected_request_ids = set(snapshot.student_demand_plan["selected_request_ids"])
+
+    assert demand_by_name == {
+        "Algebra Linear": 3,
+        "Calculo A": 50,
+        "Fisica I": 3,
+        "Geometria Analitica": 3,
+    }
+    assert snapshot.student_demand_plan["alternative_assignments"] == 2
+    assert snapshot.student_demand_plan["complex_bundle_groups"] == 2
+    assert branch_two_request_ids <= selected_request_ids
+
+
+def test_optimizer_prefers_student_requested_time_window(db_session) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    professor = Professor(name="Docente Calculo")
+    room = Room(name="Sala", capacity=30, kind=RoomKind.lecture)
+    monday = TimeSlot(day=0, start_minute=19 * 60, end_minute=21 * 60, label="Seg 19-21")
+    tuesday = TimeSlot(day=1, start_minute=8 * 60, end_minute=10 * 60, label="Ter 08-10")
+    student = Student(name="Aluno", degree_program_id=program.id, current_semester=2)
+    run = OptimizationRun(
+        semester="2026/2",
+        profile="fast",
+        parameters={"student_demand_only": True, "attempts": 12, "local_steps": 4},
+    )
+    db_session.add_all([calculus, professor, room, monday, tuesday, student, run])
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4),
+            ProfessorQualification(professor_id=professor.id, course_id=calculus.id),
+        ]
+    )
+    for index in range(3):
+        learner = student if index == 0 else Student(
+            name=f"Aluno extra {index}",
+            degree_program_id=program.id,
+            current_semester=2,
+        )
+        if index:
+            db_session.add(learner)
+            db_session.flush()
+        db_session.add(
+            StudentCourseRequest(
+                student_id=learner.id,
+                course_id=calculus.id,
+                target_semester="2026/2",
+                priority=5,
+                desired_day=1,
+                desired_start_minute=8 * 60,
+                desired_end_minute=10 * 60,
+            )
+        )
+    db_session.commit()
+
+    result = run_optimization(db_session, run)
+    assignment = db_session.query(Assignment).filter(Assignment.run_id == result.id).one()
+
+    assert result.status == "feasible"
+    assert result.metrics["hard_conflicts"] == 0
+    assert assignment.time_slot_id == tuesday.id
+
+
 def test_demand_driven_solver_prunes_sections_when_teacher_capacity_is_insufficient(
     db_session,
 ) -> None:

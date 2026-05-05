@@ -211,6 +211,12 @@ class StudentCourseRequest(Base):
     priority: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     preference_order: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     alternative_group: Mapped[str | None] = mapped_column(String(80))
+    desired_day: Mapped[int | None] = mapped_column(Integer)
+    desired_start_minute: Mapped[int | None] = mapped_column(Integer)
+    desired_end_minute: Mapped[int | None] = mapped_column(Integer)
+    time_preference_strength: Mapped[ConstraintStrength] = mapped_column(
+        Enum(ConstraintStrength), default=ConstraintStrength.soft, nullable=False
+    )
     stage: Mapped[str] = mapped_column(String(40), default="pre_enrollment", nullable=False)
     source: Mapped[str] = mapped_column(String(40), default="student", nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
