@@ -447,16 +447,21 @@ function ResultSlide() {
   const [elapsed, setElapsed] = useState(0);
   const [catalog, setCatalog] = useState<CalendarCatalog | null>(null);
   const running = !run || run.status === "pending" || run.status === "running";
+  const runId = run?.id;
+  const runStatus = run?.status;
 
   useEffect(() => {
-    if (!run) {
+    if (!runId || !runStatus) {
       startOptimization().catch(console.error);
       return;
     }
-    refreshOptimization().catch(console.error);
-    const poll = window.setInterval(() => refreshOptimization().catch(console.error), running ? 10000 : 120000);
+
+    refreshOptimization(runId).catch(console.error);
+    if (runStatus !== "pending" && runStatus !== "running") return;
+
+    const poll = window.setInterval(() => refreshOptimization(runId).catch(console.error), 120000);
     return () => window.clearInterval(poll);
-  }, [refreshOptimization, run, running, startOptimization]);
+  }, [refreshOptimization, runId, runStatus, startOptimization]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {

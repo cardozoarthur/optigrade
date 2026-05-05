@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useMemo, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   Assignment,
   OptimizationRun,
@@ -23,7 +23,7 @@ type PresentationState = {
   revokeTeacherLink: () => Promise<void>;
   revokeStudentLink: () => Promise<void>;
   startOptimization: () => Promise<void>;
-  refreshOptimization: () => Promise<void>;
+  refreshOptimization: (runId?: string) => Promise<void>;
 };
 
 const PresentationContext = createContext<PresentationState | null>(null);
@@ -36,43 +36,49 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [optimizationStartedAt, setOptimizationStartedAt] = useState<number | null>(null);
   const [optimizationError, setOptimizationError] = useState<string | null>(null);
+  const runRef = useRef<OptimizationRun | null>(null);
 
-  async function loadStats() {
+  useEffect(() => {
+    runRef.current = run;
+  }, [run]);
+
+  const loadStats = useCallback(async () => {
     setStats(await api<PresentationStats>("/presentation/stats"));
-  }
+  }, []);
 
-  async function createTeacherLink() {
+  const createTeacherLink = useCallback(async () => {
     if (teacherLink) return;
     const link = await api<PresentationLink>("/presentation/teacher-link", {
       method: "POST",
       body: JSON.stringify({ semester: "2026/2" })
     });
     setTeacherLink(link);
-  }
+  }, [teacherLink]);
 
-  async function createStudentLink() {
+  const createStudentLink = useCallback(async () => {
     if (studentLink) return;
     const link = await api<PresentationLink>("/presentation/student-link", {
       method: "POST",
       body: JSON.stringify({ semester: "2026/2" })
     });
     setStudentLink(link);
-  }
+  }, [studentLink]);
 
-  async function revokeTeacherLink() {
+  const revokeTeacherLink = useCallback(async () => {
     if (!teacherLink) return;
     await api(`/presentation/teacher-link/${teacherLink.token}/revoke`, { method: "POST" });
     setTeacherLink(null);
-  }
+  }, [teacherLink]);
 
-  async function revokeStudentLink() {
+  const revokeStudentLink = useCallback(async () => {
     if (!studentLink) return;
     await api(`/presentation/student-link/${studentLink.token}/revoke`, { method: "POST" });
     setStudentLink(null);
-  }
+  }, [studentLink]);
 
-  async function startOptimization() {
-    if (run && (run.status === "pending" || run.status === "running")) return;
+  const startOptimization = useCallback(async () => {
+    const currentRun = runRef.current;
+    if (currentRun && (currentRun.status === "pending" || currentRun.status === "running")) return;
     const startedAt = Date.now();
     setOptimizationStartedAt(startedAt);
     setOptimizationError(null);
@@ -82,7 +88,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
         method: "POST",
         body: JSON.stringify({
           semester: "2026/2",
-          profile: "deep",
+          profile: "balanced",
           parameters: {
             student_demand_only: true,
             auto_enrollment: true,
@@ -93,22 +99,25 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
           }
         })
       });
+      runRef.current = nextRun;
       setRun(nextRun);
     } catch (error) {
       setOptimizationError(error instanceof Error ? error.message : "Falha ao iniciar otimização");
+      runRef.current = null;
       setRun(null);
     }
-  }
+  }, []);
 
-  async function refreshOptimization() {
-    const targetRun = run;
-    if (!targetRun) return;
-    const fresh = await api<OptimizationRun>(`/optimization/runs/${targetRun.id}`);
+  const refreshOptimization = useCallback(async (runId?: string) => {
+    const targetRunId = runId ?? runRef.current?.id;
+    if (!targetRunId) return;
+    const fresh = await api<OptimizationRun>(`/optimization/runs/${targetRunId}`);
+    runRef.current = fresh;
     setRun(fresh);
     if (fresh.status === "feasible" || fresh.status === "infeasible" || fresh.status === "failed") {
       setAssignments(await api<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`));
     }
-  }
+  }, []);
 
   const value = useMemo(
     () => ({
@@ -127,7 +136,22 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
       startOptimization,
       refreshOptimization
     }),
-    [teacherLink, studentLink, stats, run, assignments, optimizationStartedAt, optimizationError]
+    [
+      teacherLink,
+      studentLink,
+      stats,
+      run,
+      assignments,
+      optimizationStartedAt,
+      optimizationError,
+      loadStats,
+      createTeacherLink,
+      createStudentLink,
+      revokeTeacherLink,
+      revokeStudentLink,
+      startOptimization,
+      refreshOptimization
+    ]
   );
 
   return <PresentationContext.Provider value={value}>{children}</PresentationContext.Provider>;
