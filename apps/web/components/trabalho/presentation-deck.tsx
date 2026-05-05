@@ -51,6 +51,7 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
   } = usePresentation();
   const slide = slideBySlug(slug);
   const progress = (slide.index / trabalhoSlides.length) * 100;
+  const scrollableSlide = slug === "resultado";
 
   const goTo = useCallback(
     (nextSlug: TrabalhoSlideSlug) => {
@@ -137,7 +138,11 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -16, scale: 0.99 }}
           transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
-          className="mx-auto grid h-screen max-w-7xl content-center overflow-hidden px-4 pb-4 pt-20 sm:px-6"
+          className={`mx-auto grid h-screen max-w-7xl px-4 pt-20 sm:px-6 ${
+            scrollableSlide
+              ? "content-start overflow-y-auto overscroll-contain pb-8 [scrollbar-gutter:stable]"
+              : "content-center overflow-hidden pb-4"
+          }`}
         >
           <SlideContent slug={slug} onNext={goNext} />
         </motion.section>
@@ -508,7 +513,7 @@ function ResultSlide() {
   }
 
   return (
-    <section className="grid gap-5">
+    <section className="grid gap-5 pb-6">
       <div className="grid gap-3 md:grid-cols-4">
         <MetricTile label="Status" value={run.status} tone={run.status === "feasible" ? "green" : "amber"} />
         <MetricTile label="Tempo total" value={formatMs(Number(run.metrics?.elapsed_ms ?? 0))} />
@@ -747,7 +752,7 @@ function CalendarPreview({
   const campusById = useMemo(() => indexBy(catalog?.campuses ?? []), [catalog?.campuses]);
   const slots = [...(catalog?.slots ?? [])].sort((a, b) => a.day - b.day || a.start_minute - b.start_minute);
   const usedSlotIds = new Set(assignments.map((assignment) => assignment.time_slot_id));
-  const visibleSlots = slots.filter((slot) => usedSlotIds.has(slot.id)).slice(0, 8);
+  const visibleSlots = slots.filter((slot) => usedSlotIds.has(slot.id));
   const visibleAssignmentCount = visibleSlots.reduce(
     (total, slot) => total + assignments.filter((assignment) => assignment.time_slot_id === slot.id).length,
     0
@@ -770,7 +775,7 @@ function CalendarPreview({
               </div>
               <div className="mt-2 grid gap-2">
                 {cellAssignments.length ? (
-                  cellAssignments.slice(0, 2).map((assignment) => {
+                  cellAssignments.map((assignment) => {
                     const course = courseById[assignment.course_id];
                     const professor = professorById[assignment.professor_id];
                     const room = roomById[assignment.room_id];
@@ -788,9 +793,6 @@ function CalendarPreview({
                     Sem oferta neste horário
                   </div>
                 )}
-                {cellAssignments.length > 2 ? (
-                  <div className="text-[11px] font-semibold text-lake">+{cellAssignments.length - 2} ofertas no mesmo horário</div>
-                ) : null}
               </div>
             </div>
           );
