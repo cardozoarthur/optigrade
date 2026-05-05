@@ -46,6 +46,61 @@ def test_create_run_reuses_equivalent_active_run(monkeypatch, db_session) -> Non
     assert enqueued == [existing.id]
 
 
+def test_create_run_ignores_volatile_presentation_parameters(monkeypatch, db_session) -> None:
+    enqueued: list[str] = []
+    existing = OptimizationRun(
+        semester="2026/2",
+        profile="balanced",
+        parameters={
+            "student_demand_only": True,
+            "auto_enrollment": True,
+            "source": "trabalho",
+            "presentation_run_id": "old-client-run",
+            "requested_at": "2026-05-05T00:00:00Z",
+        },
+        status=RunStatus.pending,
+    )
+    db_session.add(existing)
+    db_session.commit()
+    monkeypatch.setattr(optimization, "enqueue_optimization_run", lambda run_id: enqueued.append(run_id))
+
+    run = optimization.create_run(
+        OptimizationRunCreate(
+            semester="2026/2",
+            profile="balanced",
+            parameters={
+                "student_demand_only": True,
+                "auto_enrollment": True,
+                "source": "trabalho",
+                "presentation_run_id": "new-client-run",
+                "requested_at": "2026-05-05T00:01:00Z",
+            },
+        ),
+        db_session,
+    )
+
+    assert run.id == existing.id
+    assert enqueued == [existing.id]
+
+
+def test_get_run_requeues_pending_run(monkeypatch, db_session) -> None:
+    enqueued: list[str] = []
+    existing = OptimizationRun(
+        semester="2026/2",
+        profile="balanced",
+        parameters={"student_demand_only": True},
+        status=RunStatus.pending,
+    )
+    db_session.add(existing)
+    db_session.commit()
+    monkeypatch.setattr(optimization, "enqueue_optimization_run", lambda run_id: enqueued.append(run_id))
+
+    run = optimization.get_run(existing.id, db_session)
+
+    assert run.id == existing.id
+    assert enqueued == [existing.id]
+
+
 def test_reoptimize_returns_new_pending_run(monkeypatch, db_session) -> None:
     enqueued: list[str] = []
     previous = OptimizationRun(

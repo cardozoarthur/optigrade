@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.entities import Assignment, OptimizationRun
+from app.models.entities import Assignment, OptimizationRun, RunStatus
 from app.schemas import (
     AssignmentRead,
     ManualAdjustmentCreate,
@@ -49,6 +49,8 @@ def get_run(run_id: str, db: Session = Depends(get_db)) -> OptimizationRun:
     run = db.get(OptimizationRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Execucao nao encontrada")
+    if run.status == RunStatus.pending:
+        enqueue_optimization_run(run.id)
     return run
 
 

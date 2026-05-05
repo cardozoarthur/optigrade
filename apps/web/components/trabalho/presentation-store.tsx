@@ -37,6 +37,9 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
   const [optimizationStartedAt, setOptimizationStartedAt] = useState<number | null>(null);
   const [optimizationError, setOptimizationError] = useState<string | null>(null);
   const runRef = useRef<OptimizationRun | null>(null);
+  const startPromiseRef = useRef<Promise<void> | null>(null);
+  const presentationRunIdRef = useRef(newRunId());
+  const requestedAtRef = useRef<string | null>(null);
 
   useEffect(() => {
     runRef.current = run;
@@ -79,11 +82,17 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
   const startOptimization = useCallback(async () => {
     const currentRun = runRef.current;
     if (currentRun && (currentRun.status === "pending" || currentRun.status === "running")) return;
+    if (startPromiseRef.current) return startPromiseRef.current;
+
     const startedAt = Date.now();
+    if (!requestedAtRef.current) {
+      requestedAtRef.current = new Date(startedAt).toISOString();
+    }
     setOptimizationStartedAt(startedAt);
     setOptimizationError(null);
     setAssignments([]);
-    try {
+
+    startPromiseRef.current = (async () => {
       const nextRun = await api<OptimizationRun>("/optimization/runs", {
         method: "POST",
         body: JSON.stringify({
@@ -94,17 +103,23 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
             auto_enrollment: true,
             enrollment_stage: "pre_enrollment",
             source: "trabalho",
-            presentation_run_id: newRunId(),
-            requested_at: new Date(startedAt).toISOString()
+            presentation_run_id: presentationRunIdRef.current,
+            requested_at: requestedAtRef.current
           }
         })
       });
       runRef.current = nextRun;
       setRun(nextRun);
+    })();
+
+    try {
+      await startPromiseRef.current;
     } catch (error) {
       setOptimizationError(error instanceof Error ? error.message : "Falha ao iniciar otimização");
       runRef.current = null;
       setRun(null);
+    } finally {
+      startPromiseRef.current = null;
     }
   }, []);
 

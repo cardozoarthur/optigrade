@@ -12,6 +12,7 @@ const CACHEABLE_READS = new Set([...CATALOG_RESOURCES, "readiness"]);
 
 const CATALOG_REVALIDATE_SECONDS = 300;
 const READINESS_REVALIDATE_SECONDS = 30;
+const OPTIMIZATION_RUN_REVALIDATE_SECONDS = 120;
 
 export type BffReadCachePolicy = {
   revalidate: number;
@@ -20,6 +21,17 @@ export type BffReadCachePolicy = {
 
 export function getBffReadCachePolicy(path: string[], organizationId?: string | null): BffReadCachePolicy | null {
   const [resource] = path;
+  if (resource === "optimization" && path[1] === "runs" && path.length === 3) {
+    const runId = path[2];
+    return {
+      revalidate: OPTIMIZATION_RUN_REVALIDATE_SECONDS,
+      tags: [
+        scopedTag("optimization-runs", organizationId),
+        scopedTag(`optimization-run:${runId}`, organizationId)
+      ]
+    };
+  }
+
   if (!resource || path.length !== 1 || !CACHEABLE_READS.has(resource)) {
     return null;
   }
@@ -55,6 +67,13 @@ export function getBffMutationTags(path: string[], organizationId?: string | nul
   if (CATALOG_RESOURCES.has(resource)) {
     tags.add(scopedTag(resource, organizationId));
     tags.add(scopedTag("catalog", organizationId));
+  }
+
+  if (resource === "optimization") {
+    tags.add(scopedTag("optimization-runs", organizationId));
+    if (path[1] === "runs" && path[2]) {
+      tags.add(scopedTag(`optimization-run:${path[2]}`, organizationId));
+    }
   }
 
   if (resource === "students") {

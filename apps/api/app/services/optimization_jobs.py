@@ -58,6 +58,7 @@ def find_active_run(
     profile: str,
     parameters: dict,
 ) -> OptimizationRun | None:
+    normalized_parameters = normalize_run_parameters(parameters)
     runs = (
         db.query(OptimizationRun)
         .filter(
@@ -69,7 +70,14 @@ def find_active_run(
         .limit(25)
         .all()
     )
-    return next((run for run in runs if run.parameters == parameters), None)
+    return next((run for run in runs if normalize_run_parameters(run.parameters) == normalized_parameters), None)
+
+
+def normalize_run_parameters(parameters: dict) -> dict:
+    normalized = dict(parameters)
+    normalized.pop("presentation_run_id", None)
+    normalized.pop("requested_at", None)
+    return normalized
 
 
 def _run_optimization_job(run_id: str) -> None:
