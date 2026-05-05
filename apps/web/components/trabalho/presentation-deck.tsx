@@ -84,7 +84,7 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
       }
       if (event.key === "ArrowLeft") {
         event.preventDefault();
-        goPrevious();
+        retreat(rootRef.current, goPrevious);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -94,7 +94,7 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
   return (
     <main
       ref={rootRef}
-      className="h-screen overflow-hidden bg-[#f6f8fb] text-ink"
+      className="h-screen overflow-y-auto bg-[#f6f8fb] text-ink lg:overflow-hidden"
       style={{
         backgroundImage:
           "linear-gradient(135deg, rgba(27,107,147,0.08), transparent 28%), linear-gradient(315deg, rgba(63,125,88,0.09), transparent 34%)"
@@ -112,7 +112,7 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={goPrevious}
+              onClick={() => retreat(rootRef.current, goPrevious)}
               className="focus-ring inline-flex h-10 w-10 items-center justify-center rounded-md border border-slateLine bg-white transition hover:-translate-y-0.5 hover:border-lake hover:text-lake"
               aria-label="Slide anterior"
             >
@@ -140,10 +140,10 @@ export function PresentationDeck({ slug }: { slug: TrabalhoSlideSlug }) {
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -16, scale: 0.99 }}
           transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
-          className={`mx-auto grid h-screen max-w-7xl px-4 pt-20 sm:px-6 ${
+          className={`mx-auto grid min-h-screen max-w-7xl px-4 pt-20 sm:px-6 lg:h-screen ${
             scrollableSlide
               ? "content-start overflow-y-auto overscroll-contain pb-8 [scrollbar-gutter:stable]"
-              : "content-center overflow-hidden pb-4"
+              : "content-center overflow-y-auto pb-6 lg:overflow-hidden lg:pb-4"
           }`}
         >
           <SlideContent slug={slug} onNext={goNext} />
@@ -175,6 +175,17 @@ function advance(root: HTMLElement | null, fallback: () => void) {
   fallback();
 }
 
+function retreat(root: HTMLElement | null, fallback: () => void) {
+  if (root) {
+    const action = root.querySelector<HTMLButtonElement>("[data-slide-secondary]");
+    if (action && !action.disabled) {
+      action.click();
+      return;
+    }
+  }
+  fallback();
+}
+
 function SlideContent({ slug, onNext }: { slug: TrabalhoSlideSlug; onNext: () => void }) {
   switch (slug) {
     case "apresentacao":
@@ -198,7 +209,7 @@ function SlideContent({ slug, onNext }: { slug: TrabalhoSlideSlug; onNext: () =>
     case "parametros":
       return <ParametersSlide onNext={onNext} />;
     case "fluxo-otimizacao":
-      return <OptimizationFlowSlide />;
+      return <OptimizationFlowSlide onNext={onNext} />;
     case "comparacao":
       return <ComparisonSlide />;
     case "resultado":
@@ -451,7 +462,8 @@ function ComparisonSlide() {
   );
 }
 
-function OptimizationFlowSlide() {
+function OptimizationFlowSlide({ onNext }: { onNext: () => void }) {
+  const [activeStep, setActiveStep] = useState(0);
   const steps = [
     {
       title: "Piso obrigatório",
@@ -484,10 +496,21 @@ function OptimizationFlowSlide() {
       icon: Cpu
     }
   ];
+  const step = steps[activeStep];
+  const Icon = step.icon;
+  const isLastStep = activeStep === steps.length - 1;
+  const goForward = () => {
+    if (isLastStep) {
+      onNext();
+      return;
+    }
+    setActiveStep((current) => Math.min(current + 1, steps.length - 1));
+  };
+  const goBack = () => setActiveStep((current) => Math.max(current - 1, 0));
 
   return (
-    <section className="grid max-h-full gap-4">
-      <div className="max-w-5xl">
+    <section className="grid max-h-full gap-4 lg:grid-cols-[0.78fr_1fr] lg:items-center">
+      <div className="max-w-4xl">
         <p className="text-sm font-semibold uppercase text-lake">Ordem de execução</p>
         <h2 className="mt-2 text-3xl font-semibold leading-tight sm:text-5xl">
           O problema é quebrado em decisões menores antes da grade final.
@@ -496,33 +519,81 @@ function OptimizationFlowSlide() {
           A estratégia segue a lógica da Pesquisa Operacional: fixar o que não pode faltar,
           reduzir alternativas equivalentes e só então otimizar horários, salas, professores e matrícula.
         </p>
+        <div className="mt-5 grid gap-2">
+          {steps.map((item, index) => (
+            <button
+              key={item.title}
+              type="button"
+              onClick={() => setActiveStep(index)}
+              className={`focus-ring flex h-10 items-center gap-3 rounded-md border px-3 text-left text-sm transition ${
+                index === activeStep
+                  ? "border-lake bg-white text-ink shadow-panel"
+                  : "border-slateLine bg-white/70 text-slate-500 hover:border-lake/50 hover:text-ink"
+              }`}
+            >
+              <span className={`grid h-6 w-6 place-items-center rounded-md text-xs font-semibold ${
+                index === activeStep ? "bg-lake text-white" : "bg-slate-100"
+              }`}>
+                {index + 1}
+              </span>
+              <span className="truncate">{item.title}</span>
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {steps.map((step, index) => (
+
+      <Panel className="grid min-h-[360px] content-between overflow-hidden p-0 sm:min-h-[420px]">
+        <AnimatePresence mode="wait">
           <motion.div
             key={step.title}
-            initial={{ opacity: 0, y: 14 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: index * 0.06 }}
-            className="rounded-md border border-slateLine bg-white px-4 py-3 shadow-panel transition hover:-translate-y-0.5 hover:border-lake/40"
+            initial={{ opacity: 0, x: 36, scale: 0.98 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, x: -28, scale: 0.99 }}
+            transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+            className="grid min-h-[300px] content-center gap-5 p-6 sm:p-8"
           >
-            <div className="flex items-center gap-3">
-              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-lake/10 text-lake">
-                <step.icon size={18} />
+            <div className="flex items-center justify-between gap-3">
+              <div className="grid h-14 w-14 place-items-center rounded-md bg-lake/10 text-lake">
+                <Icon size={28} />
               </div>
-              <div>
-                <div className="text-xs font-semibold uppercase text-slate-500">Etapa {index + 1}</div>
-                <h3 className="text-base font-semibold">{step.title}</h3>
+              <div className="rounded-md border border-slateLine bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600">
+                Etapa {activeStep + 1}/{steps.length}
               </div>
             </div>
-            <p className="mt-3 text-sm leading-relaxed text-slate-700">{step.text}</p>
+            <div>
+              <h3 className="text-3xl font-semibold leading-tight sm:text-5xl">{step.title}</h3>
+              <p className="mt-5 max-w-2xl text-base leading-relaxed text-slate-700 sm:text-lg">{step.text}</p>
+            </div>
+            {isLastStep ? (
+              <div className="rounded-md border border-moss/25 bg-moss/10 px-4 py-3 text-sm leading-relaxed text-slate-700">
+                No run final do piloto, essa sequência fechou com 0 conflitos hard, 0 demandas pendentes,
+                0 turmas abaixo do mínimo e 0 alunos sem matrícula após a etapa de resgate.
+              </div>
+            ) : null}
           </motion.div>
-        ))}
-      </div>
-      <div className="rounded-md border border-moss/25 bg-moss/10 px-4 py-3 text-sm leading-relaxed text-slate-700">
-        No run final do piloto, essa sequência fechou com 0 conflitos hard, 0 demandas pendentes,
-        0 turmas abaixo do mínimo e 0 alunos sem matrícula após a etapa de resgate.
-      </div>
+        </AnimatePresence>
+        <div className="flex items-center justify-between gap-3 border-t border-slateLine bg-slate-50 px-4 py-3">
+          <button
+            type="button"
+            data-slide-secondary={activeStep > 0 ? true : undefined}
+            onClick={goBack}
+            disabled={activeStep === 0}
+            className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-slateLine bg-white px-3 text-sm font-semibold text-slate-700 transition hover:-translate-y-0.5 hover:border-lake hover:text-lake disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:border-slateLine disabled:hover:text-slate-700"
+          >
+            <ArrowLeft size={16} />
+            Voltar etapa
+          </button>
+          <button
+            type="button"
+            data-slide-primary
+            onClick={goForward}
+            className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-lake"
+          >
+            {isLastStep ? "Comparar projetos" : "Próxima etapa"}
+            <ArrowRight size={16} />
+          </button>
+        </div>
+      </Panel>
     </section>
   );
 }

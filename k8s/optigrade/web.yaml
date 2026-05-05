@@ -46,7 +46,7 @@ spec:
             - until wget -q -O /dev/null http://optigrade-api:8000/health; do sleep 2; done
       containers:
         - name: web
-          image: ttl.sh/optigrade-web-20260505-flow-slide:24h
+          image: ttl.sh/optigrade-web-20260505-flow-stepper:24h
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
