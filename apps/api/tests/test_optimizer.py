@@ -18,7 +18,12 @@ from app.models.entities import (
     TimeSlot,
     OptimizationRun,
 )
-from app.services.optimizer import build_snapshot, diagnose_snapshot, run_optimization
+from app.services.optimizer import (
+    build_snapshot,
+    diagnose_snapshot,
+    planned_section_sizes_from_capacity,
+    run_optimization,
+)
 
 
 def test_diagnosis_detects_course_without_qualified_professor(db_session) -> None:
@@ -460,6 +465,137 @@ def test_shared_context_groups_equivalent_courses(db_session) -> None:
     assert set(shared_course.source_course_ids) == {production_calculus.id, civil_calculus.id}
     assert shared_course.id in snapshot.qualifications[professor.id]
     assert diagnose_snapshot(snapshot) == []
+
+
+def test_courses_with_teacher_suffix_are_planned_as_one_offer(db_session) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    tcc_one = Course(
+        name="TRABALHO DE CONCLUSÃO DE CURSO (T1)",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=10,
+        expected_demand=3,
+    )
+    tcc_four = Course(
+        name="TRABALHO DE CONCLUSÃO DE CURSO (T4)",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=10,
+        expected_demand=3,
+    )
+    professor_one = Professor(name="Docente T1")
+    professor_four = Professor(name="Docente T4")
+    room = Room(name="Sala 20", capacity=20, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    db_session.add_all([tcc_one, tcc_four, professor_one, professor_four, room, slot])
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProfessorContract(professor_id=professor_one.id, min_hours=0, max_hours=4),
+            ProfessorContract(professor_id=professor_four.id, min_hours=0, max_hours=4),
+            ProfessorQualification(professor_id=professor_one.id, course_id=tcc_one.id),
+            ProfessorQualification(professor_id=professor_four.id, course_id=tcc_four.id),
+        ]
+    )
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session)
+    shared_course = snapshot.courses[0]
+
+    assert len(snapshot.courses) == 1
+    assert shared_course.name == "TRABALHO DE CONCLUSÃO DE CURSO (2 cursos)"
+    assert shared_course.expected_demand == 6
+    assert set(shared_course.source_course_ids) == {tcc_one.id, tcc_four.id}
+    assert shared_course.id in snapshot.qualifications[professor_one.id]
+    assert shared_course.id in snapshot.qualifications[professor_four.id]
+
+
+def test_planned_sections_are_balanced_when_multiple_classes_are_opened() -> None:
+    assert planned_section_sizes_from_capacity(60, 50, 0) == (
+        [30, 30],
+        0,
+        "balanced_additional_section",
+    )
+    assert planned_section_sizes_from_capacity(103, 50, 60) == (
+        [52, 51],
+        0,
+        "balanced_absorbed_remainder",
+    )
+
+
+def test_multiple_sections_prefer_different_professors_and_balanced_load(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    course = Course(
+        name="Pesquisa Operacional",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=6,
+        expected_demand=80,
+    )
+    professors = [Professor(name="Docente A"), Professor(name="Docente B")]
+    room = Room(name="Sala 50", capacity=50, kind=RoomKind.lecture)
+    slots = [
+        TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10"),
+        TimeSlot(day=1, start_minute=480, end_minute=600, label="Ter 08-10"),
+    ]
+    run = OptimizationRun(
+        semester="2026/2",
+        profile="fast",
+        parameters={"student_demand_only": True, "attempts": 8, "local_steps": 4},
+    )
+    db_session.add_all([course, *professors, room, *slots, run])
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4)
+            for professor in professors
+        ]
+    )
+    db_session.add_all(
+        [
+            ProfessorQualification(professor_id=professor.id, course_id=course.id)
+            for professor in professors
+        ]
+    )
+    students = [
+        Student(name=f"Aluno PO {index:02d}", degree_program_id=program.id, current_semester=6)
+        for index in range(80)
+    ]
+    db_session.add_all(students)
+    db_session.flush()
+    db_session.add_all(
+        [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=course.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+            for student in students
+        ]
+    )
+    db_session.commit()
+
+    result = run_optimization(db_session, run)
+    assignments = db_session.query(Assignment).filter(Assignment.run_id == result.id).all()
+
+    assert result.status == "feasible"
+    assert result.metrics["hard_conflicts"] == 0
+    assert sorted(section["planned_students"] for section in result.metrics["planned_sections"]) == [40, 40]
+    assert len({assignment.professor_id for assignment in assignments}) == 2
+    assert result.metrics["section_professor_concentration"] == 0
 
 
 def test_demand_solver_uses_alternatives_to_avoid_tiny_leftover_section(db_session) -> None:

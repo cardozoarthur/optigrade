@@ -39,6 +39,12 @@ from app.services.student_planning import (
     demand_from_bundle_allocations,
     student_demand_choice_summary,
 )
+from app.services.course_identity import (
+    academic_group_identity,
+    course_base_name,
+    normalize_context_key,
+    normalized_course_name_key,
+)
 
 PLANNING_SECTION_CAPACITY = 50
 PLANNING_MIN_SECTION_DEMAND = 3
@@ -488,6 +494,7 @@ def build_snapshot(
         courses, teacher_pruning = prune_courses_for_teaching_capacity(
             courses,
             professors,
+            rooms,
             slots,
             contracts,
             qualifications,
@@ -807,12 +814,19 @@ def best_batch_move_from_problem_bucket(
     source_bucket = buckets.get(source_bucket_key)
     if not source_bucket:
         return []
+    source_demand = bucket_demand.get(source_bucket_key, 0)
     _sizes, unserved, _strategy = planned_section_sizes_from_capacity(
-        bucket_demand.get(source_bucket_key, 0),
+        source_demand,
         source_bucket.regular_capacity,
         source_bucket.large_capacity,
     )
-    if unserved <= 0:
+    small_excess = demand_small_excess_count(
+        source_demand,
+        source_bucket.regular_capacity,
+        source_bucket.large_capacity,
+    )
+    problem_units = unserved or small_excess
+    if problem_units <= 0:
         return []
 
     alternatives_by_signature: dict[
@@ -844,7 +858,7 @@ def best_batch_move_from_problem_bucket(
                 bundle_created_at(allocations[item[0]]),
             )
         )
-        max_count = min(len(candidates), max(unserved + 3, 12))
+        max_count = min(len(candidates), max(problem_units + 3, 12))
         for move_count in range(1, max_count + 1):
             batch = candidates[:move_count]
             delta = batch_move_delta(batch, allocations, bucket_demand, buckets, bucket_by_course)
@@ -1021,7 +1035,36 @@ def demand_bucket_cost(demand: int, bucket: DemandPlanningBucket) -> float:
     section_count_penalty = len(sizes) * 34.0
     residual_penalty = unserved * 1_200.0
     balance_penalty = statistics.pstdev(sizes) if len(sizes) > 1 else 0.0
-    return section_count_penalty + residual_penalty + large_room_penalty + balance_penalty
+    small_excess_penalty = demand_small_excess_penalty(
+        demand,
+        bucket.regular_capacity,
+        bucket.large_capacity,
+    )
+    return (
+        section_count_penalty
+        + residual_penalty
+        + large_room_penalty
+        + balance_penalty
+        + small_excess_penalty
+    )
+
+
+def demand_small_excess_penalty(demand: int, regular_capacity: int, large_capacity: int) -> float:
+    remainder = demand_small_excess_count(demand, regular_capacity, large_capacity)
+    if remainder <= 0:
+        return 0.0
+    return float(PLANNING_MIN_SECTION_DEMAND - remainder) * 80.0
+
+
+def demand_small_excess_count(demand: int, regular_capacity: int, large_capacity: int) -> int:
+    if demand <= regular_capacity or regular_capacity <= 0:
+        return 0
+    full_sections, remainder = divmod(demand, regular_capacity)
+    if remainder == 0 or remainder >= PLANNING_MIN_SECTION_DEMAND:
+        return 0
+    if large_capacity and full_sections and demand <= full_sections * large_capacity:
+        return 0
+    return remainder
 
 
 def demand_choice_penalty(choice: DemandChoiceBundle) -> float:
@@ -1041,6 +1084,13 @@ def bundle_created_at(bundle: DemandChoiceBundle):
 def bucket_problem_weight(demand: int, bucket: DemandPlanningBucket) -> float:
     if demand <= 0:
         return 0.0
+    small_excess = demand_small_excess_penalty(
+        demand,
+        bucket.regular_capacity,
+        bucket.large_capacity,
+    )
+    if small_excess:
+        return small_excess
     sizes, unserved, _strategy = planned_section_sizes_from_capacity(
         demand,
         bucket.regular_capacity,
@@ -1108,6 +1158,7 @@ def demand_bucket_label(group: list[Course]) -> str:
 def prune_courses_for_teaching_capacity(
     courses: list[CourseData],
     professors: list[ProfessorData],
+    rooms: list[RoomData],
     slots: list[SlotData],
     contracts: dict[str, ContractData],
     qualifications: dict[str, set[str]],
@@ -1168,7 +1219,103 @@ def prune_courses_for_teaching_capacity(
             )
     if not removed_course_ids:
         return courses, []
-    return [course for course in courses if course.id not in removed_course_ids], pruning
+    kept_courses, redistributed_pruning = redistribute_sections_after_teacher_pruning(
+        courses,
+        removed_course_ids,
+        pruning,
+        rooms,
+    )
+    return kept_courses, redistributed_pruning
+
+
+def redistribute_sections_after_teacher_pruning(
+    courses: list[CourseData],
+    removed_course_ids: set[str],
+    pruning: list[dict[str, Any]],
+    rooms: list[RoomData],
+) -> tuple[list[CourseData], list[dict[str, Any]]]:
+    kept_by_family: dict[tuple[Any, ...], list[CourseData]] = {}
+    removed_by_family: dict[tuple[Any, ...], list[CourseData]] = {}
+    for course in courses:
+        family_key = section_family_key(course)
+        if course.id in removed_course_ids:
+            removed_by_family.setdefault(family_key, []).append(course)
+        else:
+            kept_by_family.setdefault(family_key, []).append(course)
+
+    pruning_by_family: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for item in pruning:
+        course_id = str(item.get("course_id"))
+        course = next((candidate for candidate in courses if candidate.id == course_id), None)
+        if course:
+            pruning_by_family.setdefault(section_family_key(course), []).append(item)
+
+    redistributed: list[CourseData] = []
+    for family_key, kept_courses in kept_by_family.items():
+        removed_courses = removed_by_family.get(family_key, [])
+        if not removed_courses:
+            redistributed.extend(kept_courses)
+            continue
+        kept_courses = sorted(kept_courses, key=lambda item: item.section_index)
+        total_demand = max(
+            [course.planned_total_demand or course.expected_demand for course in [*kept_courses, *removed_courses]],
+            default=sum(course.expected_demand for course in kept_courses),
+        )
+        section_capacity = max_compatible_section_capacity(kept_courses[0], rooms)
+        served_demand = min(total_demand, section_capacity * len(kept_courses))
+        unserved_demand = max(0, total_demand - served_demand)
+        balanced_sizes = balanced_section_sizes(served_demand, len(kept_courses))
+        for course, size in zip(kept_courses, balanced_sizes, strict=True):
+            redistributed.append(
+                replace(
+                    course,
+                    expected_demand=size,
+                    section_count=len(kept_courses),
+                    planned_unserved_demand=unserved_demand,
+                    section_strategy="teacher_capacity_rebalanced_sections",
+                )
+            )
+        family_pruning = pruning_by_family.get(family_key, [])
+        if family_pruning:
+            family_pruning[0]["planned_students"] = unserved_demand
+            family_pruning[0]["reason"] = (
+                "Capacidade docente indisponivel para abrir todas as turmas; "
+                "demanda redistribuida nas secoes viaveis."
+            )
+            for item in family_pruning[1:]:
+                item["planned_students"] = 0
+    return sorted(redistributed, key=lambda item: (item.recommended_semester, item.name, item.id)), [
+        item for item in pruning if int(item.get("planned_students") or 0) > 0
+    ]
+
+
+def max_compatible_section_capacity(course: CourseData, rooms: list[RoomData]) -> int:
+    capacities = [
+        room.capacity
+        for room in rooms
+        if room_matches_course_campus(course, room)
+        and (not course.requires_lab or room.kind == RoomKind.lab.value)
+    ]
+    regular_capacity = max(
+        [capacity for capacity in capacities if capacity <= PLANNING_SECTION_CAPACITY],
+        default=PLANNING_SECTION_CAPACITY,
+    )
+    large_capacity = max(capacities, default=regular_capacity)
+    if course.planned_total_demand and course.planned_total_demand <= large_capacity:
+        return large_capacity
+    return max(regular_capacity, min(large_capacity, PLANNING_SECTION_CAPACITY))
+
+
+def section_family_key(course: CourseData) -> tuple[Any, ...]:
+    return (
+        course.source_course_ids or (course.id.split("::", 1)[0],),
+        course.campus_id,
+        course.workload_hours,
+        course.theoretical_hours,
+        course.practical_hours,
+        course.requires_lab,
+        course.kind,
+    )
 
 
 def professor_teaching_capacity_hours(
@@ -1281,20 +1428,11 @@ def demand_driven_courses(
 def course_group_key(course: Course) -> tuple[Any, ...]:
     context_key = normalize_context_key(course.context_key)
     theoretical_hours = effective_theoretical_hours(course)
-    practical_hours = course.practical_hours or 0
-    official_schedule_key = official_schedule_for_group([course])
+    academic_identity = academic_group_identity(course, theoretical_hours)
+    if academic_identity:
+        return academic_identity
     if course.shareable and context_key:
-        return (
-            "context",
-            context_key,
-            course.campus_id,
-            course.workload_hours,
-            theoretical_hours,
-            practical_hours,
-            course.requires_lab,
-            course.kind.value,
-            official_schedule_key,
-        )
+        return ("context", context_key)
     return ("course", course.id)
 
 
@@ -1310,11 +1448,18 @@ def merge_course_group(
     representative = group[0]
     source_ids = tuple(course.id for course in group)
     context_key = normalize_context_key(representative.context_key)
+    name_identity = normalized_course_name_key(representative.name)
+    effective_identity = context_key or name_identity
     theoretical_hours = effective_theoretical_hours(representative)
     practical_hours = representative.practical_hours or 0
-    is_shared_context = len(group) > 1 and bool(context_key)
+    is_shared_context = len(group) > 1 and bool(effective_identity)
     snapshot_id = (
-        stable_context_course_id(representative, theoretical_hours, practical_hours)
+        stable_context_course_id(
+            representative,
+            theoretical_hours,
+            practical_hours,
+            effective_identity,
+        )
         if is_shared_context
         else representative.id
     )
@@ -1429,16 +1574,22 @@ def planned_section_sizes_from_capacity(
         return [demand], 0, "single_regular_section"
 
     full_sections, remainder = divmod(demand, regular_capacity)
-    section_sizes = [regular_capacity for _ in range(full_sections)]
-    if remainder >= PLANNING_MIN_SECTION_DEMAND:
-        section_sizes.append(remainder)
-        return section_sizes, 0, "additional_section"
     if remainder == 0:
-        return section_sizes, 0, "regular_sections"
-    if large_capacity and section_sizes and section_sizes[-1] + remainder <= large_capacity:
-        section_sizes[-1] += remainder
-        return section_sizes, 0, "absorbed_small_remainder_in_large_room"
-    return section_sizes, remainder, "suppressed_small_remainder"
+        return balanced_section_sizes(demand, full_sections), 0, "balanced_regular_sections"
+    if large_capacity and full_sections and demand <= full_sections * large_capacity:
+        return balanced_section_sizes(demand, full_sections), 0, "balanced_absorbed_remainder"
+    section_count = full_sections + 1
+    return balanced_section_sizes(demand, section_count), 0, "balanced_additional_section"
+
+
+def balanced_section_sizes(demand: int, section_count: int) -> list[int]:
+    if section_count <= 0:
+        return []
+    base_size, extra = divmod(demand, section_count)
+    return [
+        base_size + (1 if index < extra else 0)
+        for index in range(section_count)
+    ]
 
 
 def section_course_id(course_id: str, section_index: int) -> str:
@@ -1457,15 +1608,15 @@ def effective_theoretical_hours(course: Course) -> int:
     return max(0, course.workload_hours - (course.practical_hours or 0))
 
 
-def normalize_context_key(context_key: str | None) -> str | None:
-    normalized = (context_key or "").strip().lower()
-    return normalized or None
-
-
-def stable_context_course_id(course: Course, theoretical_hours: int, practical_hours: int) -> str:
+def stable_context_course_id(
+    course: Course,
+    theoretical_hours: int,
+    practical_hours: int,
+    identity_key: str | None = None,
+) -> str:
     identity = "|".join(
         [
-            normalize_context_key(course.context_key) or course.id,
+            identity_key or normalize_context_key(course.context_key) or normalized_course_name_key(course.name) or course.id,
             str(course.workload_hours),
             str(theoretical_hours),
             str(practical_hours),
@@ -1477,7 +1628,7 @@ def stable_context_course_id(course: Course, theoretical_hours: int, practical_h
 
 
 def course_group_name(group: list[Course], context_key: str | None) -> str:
-    names = list(dict.fromkeys(course.name for course in group))
+    names = list(dict.fromkeys(course_base_name(course.name) for course in group))
     base_name = names[0] if len(names) == 1 else (context_key or "contexto compartilhado")
     if len(group) == 1:
         return base_name
@@ -1841,6 +1992,7 @@ def build_solution(snapshot: Snapshot, seed: int) -> CandidateSolution:
     professor_slot: set[tuple[str, str]] = set()
     room_slot: set[tuple[str, str]] = set()
     course_slot: set[tuple[str, str]] = set()
+    section_professors: dict[tuple[Any, ...], set[str]] = {}
     assignments: list[ProposedAssignment] = []
     hard_failures: list[dict[str, Any]] = []
 
@@ -1873,6 +2025,7 @@ def build_solution(snapshot: Snapshot, seed: int) -> CandidateSolution:
             professor_slot,
             room_slot,
             course_slot,
+            section_professors,
             rng,
         )
         if not candidates:
@@ -1892,6 +2045,7 @@ def build_solution(snapshot: Snapshot, seed: int) -> CandidateSolution:
         professor_slot.add((professor_id, slot_id))
         room_slot.add((room_id, slot_id))
         course_slot.add((course.id, slot_id))
+        section_professors.setdefault(section_family_key(course), set()).add(professor_id)
         assignments.append(
             ProposedAssignment(
                 course_id=course.id,
@@ -2093,6 +2247,7 @@ def enumerate_candidates(
     professor_slot: set[tuple[str, str]],
     room_slot: set[tuple[str, str]],
     course_slot: set[tuple[str, str]],
+    section_professors: dict[tuple[Any, ...], set[str]],
     rng: random.Random,
 ) -> list[tuple[float, str, str, str, list[dict[str, Any]]]]:
     candidates: list[tuple[float, str, str, str, list[dict[str, Any]]]] = []
@@ -2130,10 +2285,17 @@ def enumerate_candidates(
                 )
                 room_slack = max(0, room.capacity - course.expected_demand)
                 load_penalty = professor_load[professor.id] * 1.8
+                section_diversity_penalty = professor_section_diversity_penalty(
+                    snapshot,
+                    course,
+                    professor.id,
+                    section_professors,
+                )
                 day_penalty = same_day_fragmentation_penalty(snapshot, course, slot)
                 score = (
                     room_slack * 0.08
                     + load_penalty
+                    + section_diversity_penalty
                     + day_penalty
                     + time_preference_penalty
                     - preference_value * 4
@@ -2201,6 +2363,32 @@ def availability_preference(availability: list[AvailabilityData], slot: SlotData
         if overlaps and item.kind == AvailabilityKind.unavailable.value and item.strength != "hard":
             score -= 3
     return score
+
+
+def professor_section_diversity_penalty(
+    snapshot: Snapshot,
+    course: CourseData,
+    professor_id: str,
+    section_professors: dict[tuple[Any, ...], set[str]],
+) -> float:
+    if course.section_count <= 1:
+        return 0.0
+    family_key = section_family_key(course)
+    assigned_professors = section_professors.get(family_key, set())
+    if not assigned_professors:
+        return 0.0
+    qualified_professors = [
+        candidate.id
+        for candidate in snapshot.professors
+        if course.id in snapshot.qualifications.get(candidate.id, set())
+    ]
+    if len(qualified_professors) <= 1:
+        return 0.0
+    if professor_id in assigned_professors and len(assigned_professors) < len(qualified_professors):
+        return 45.0
+    if professor_id not in assigned_professors:
+        return -8.0
+    return 8.0
 
 
 def student_time_preference_penalty(
@@ -2319,13 +2507,18 @@ def rebuild_with_fixed(
     professor_slot: set[tuple[str, str]] = set()
     room_slot: set[tuple[str, str]] = set()
     course_slot: set[tuple[str, str]] = set()
+    section_professors: dict[tuple[Any, ...], set[str]] = {}
 
     for assignment in fixed:
         slot = slot_by_id[assignment.time_slot_id]
+        fixed_course = course_by_id[assignment.course_id]
         professor_load[assignment.professor_id] += slot.hours
         professor_slot.add((assignment.professor_id, assignment.time_slot_id))
         room_slot.add((assignment.room_id, assignment.time_slot_id))
         course_slot.add((assignment.course_id, assignment.time_slot_id))
+        section_professors.setdefault(section_family_key(fixed_course), set()).add(
+            assignment.professor_id
+        )
 
     course = course_by_id[removed.course_id]
     candidates = enumerate_candidates(
@@ -2335,6 +2528,7 @@ def rebuild_with_fixed(
         professor_slot,
         room_slot,
         course_slot,
+        section_professors,
         rng,
     )
     if not candidates:
@@ -2392,6 +2586,7 @@ def evaluate_solution(
     assigned_sessions = len(assignments)
     min_load_diagnostics: list[dict[str, Any]] = []
     min_load_shortfall = 0.0
+    family_section_professors: dict[tuple[Any, ...], dict[int, set[str]]] = {}
 
     for assignment in assignments:
         course = course_by_id[assignment.course_id]
@@ -2438,6 +2633,10 @@ def evaluate_solution(
         pref = snapshot.preferences.get(assignment.professor_id, {}).get(assignment.course_id)
         preference_score += pref.preference if pref else 0
         critical_sessions += course.criticality
+        family_section_professors.setdefault(section_family_key(course), {}).setdefault(
+            course.section_index,
+            set(),
+        ).add(assignment.professor_id)
 
     for professor in snapshot.professors:
         contract = snapshot.contracts.get(professor.id)
@@ -2471,6 +2670,12 @@ def evaluate_solution(
         or snapshot.contracts.get(professor.id, ContractData(0, 12)).min_hours > 0
     ]
     load_balance = statistics.pstdev(loads) if len(loads) > 1 else 0.0
+    section_professor_concentration = 0
+    for sections in family_section_professors.values():
+        if len(sections) <= 1:
+            continue
+        unique_professors = set().union(*sections.values())
+        section_professor_concentration += max(0, len(sections) - len(unique_professors))
     student_holes = estimate_student_holes(assignments, course_by_id, slot_by_id)
     soft_penalty = sum(len(assignment.soft_violations) for assignment in assignments)
     total_required = sum(
@@ -2492,6 +2697,7 @@ def evaluate_solution(
         "criticality_loss": max(0.0, 120.0 - critical_sessions),
         "soft_penalty": float(soft_penalty),
         "min_load_shortfall": round(min_load_shortfall, 3),
+        "section_professor_concentration": float(section_professor_concentration),
     }
     score = (
         objectives["hard_conflicts"] * 100_000
@@ -2503,6 +2709,7 @@ def evaluate_solution(
         + objectives["criticality_loss"] * 2
         + objectives["soft_penalty"] * 20
         + objectives["min_load_shortfall"] * 4
+        + objectives["section_professor_concentration"] * 120
     )
     metrics = {
         "hard_conflicts": len(hard),
@@ -2514,6 +2721,7 @@ def evaluate_solution(
         "coverage": round(coverage, 3),
         "raw_coverage": round(raw_coverage, 3),
         "overcoverage_sessions": overcoverage_sessions,
+        "section_professor_concentration": section_professor_concentration,
         "preference_score": preference_score,
         "room_waste": round(room_waste, 2),
         "load_by_professor": {professor.id: professor_load.get(professor.id, 0) for professor in snapshot.professors},

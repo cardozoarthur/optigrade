@@ -24,10 +24,10 @@ from app.services.student_planning import (
     completed_history_by_course,
     course_eligible_for_student,
     eligibility_course_for_student,
-    normalize_context_key,
     regular_relation_for_student,
     restrictions_for_courses,
 )
+from app.services.course_identity import academic_group_identity, normalize_context_key
 
 
 @dataclass(frozen=True)
@@ -461,20 +461,12 @@ def planned_capacity_by_assignment_section(
 
 
 def enrollment_bucket_key(course: Course) -> str:
+    academic_identity = academic_group_identity(course, course.theoretical_hours or 0)
+    if academic_identity:
+        return "|".join(academic_identity)
     context_key = normalize_context_key(course.context_key)
     if course.shareable and context_key:
-        return "|".join(
-            [
-                "context",
-                context_key,
-                course.campus_id or "any-campus",
-                str(course.workload_hours),
-                str(course.theoretical_hours or 0),
-                str(course.practical_hours or 0),
-                str(course.requires_lab),
-                course.kind.value,
-            ]
-        )
+        return f"context|{context_key}"
     return f"course:{course.id}"
 
 
