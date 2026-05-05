@@ -593,6 +593,12 @@ def solve_student_demand_plan(
         "all_eligible_demand_by_course": choice_summary.all_eligible_demand_by_course,
         "selected_demand_by_course": demand_by_course,
         "unplanned_demand_by_course": demand_from_allocations(unplanned_choices.values()),
+        "selected_request_ids": [
+            choice.request.id for choice in selected_choices.values()
+        ],
+        "unplanned_request_ids": [
+            choice.request.id for choice in unplanned_choices.values()
+        ],
         "planning_buckets": planned_bucket_metrics[:80],
     }
     return DemandPlan(

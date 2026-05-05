@@ -9,8 +9,11 @@ from app.models.entities import (
     DegreeProgram,
     OptimizationRun,
     Professor,
+    ProfessorContract,
+    ProfessorQualification,
     Room,
     RoomKind,
+    RunStatus,
     Student,
     StudentCourseHistory,
     StudentCourseRequest,
@@ -19,6 +22,8 @@ from app.models.entities import (
     TimeSlot,
 )
 from app.services.enrollment import run_enrollment_round
+from app.services.optimization_jobs import _maybe_run_automatic_enrollment
+from app.services.optimizer import run_optimization
 
 
 def test_enrollment_round_uses_alternative_queue_until_student_is_allocated(db_session) -> None:
@@ -312,3 +317,297 @@ def test_enrollment_shares_capacity_between_equivalent_course_contexts(db_sessio
     assert summary["capacity_by_course"][civil_calculus.id] == 50
     assert summary["enrolled"] == 50
     assert summary["waitlisted"] == 10
+
+
+def test_enrollment_blocks_when_any_hard_prerequisite_is_missing(db_session) -> None:
+    program = DegreeProgram(name="Computacao", code="CC")
+    db_session.add(program)
+    db_session.flush()
+    algorithms = Course(
+        name="Algoritmos",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=30,
+    )
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=30,
+    )
+    operations_research = Course(
+        name="Pesquisa Operacional",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=3,
+        expected_demand=2,
+    )
+    complete_student = Student(
+        name="Aluno com prerequisitos",
+        degree_program_id=program.id,
+        current_semester=3,
+        registration_number="2026001",
+    )
+    missing_student = Student(
+        name="Aluno sem calculo",
+        degree_program_id=program.id,
+        current_semester=3,
+        registration_number="2026002",
+    )
+    db_session.add_all(
+        [algorithms, calculus, operations_research, complete_student, missing_student]
+    )
+    db_session.flush()
+    db_session.add_all(
+        [
+            CourseRestriction(
+                course_id=operations_research.id,
+                required_course_id=algorithms.id,
+                kind=CourseRestrictionKind.prerequisite,
+                strength=ConstraintStrength.hard,
+                minimum_grade=6,
+            ),
+            CourseRestriction(
+                course_id=operations_research.id,
+                required_course_id=calculus.id,
+                kind=CourseRestrictionKind.prerequisite,
+                strength=ConstraintStrength.hard,
+                minimum_grade=6,
+            ),
+            StudentCourseHistory(
+                student_id=complete_student.id,
+                course_id=algorithms.id,
+                status=StudentCourseStatus.completed,
+                semester="2026/1",
+                grade=8,
+            ),
+            StudentCourseHistory(
+                student_id=complete_student.id,
+                course_id=calculus.id,
+                status=StudentCourseStatus.completed,
+                semester="2026/1",
+                grade=7,
+            ),
+            StudentCourseHistory(
+                student_id=missing_student.id,
+                course_id=algorithms.id,
+                status=StudentCourseStatus.completed,
+                semester="2026/1",
+                grade=9,
+            ),
+            StudentCourseRequest(
+                student_id=complete_student.id,
+                course_id=operations_research.id,
+                target_semester="2026/2",
+                priority=5,
+            ),
+            StudentCourseRequest(
+                student_id=missing_student.id,
+                course_id=operations_research.id,
+                target_semester="2026/2",
+                priority=5,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    summary = run_enrollment_round(db_session, "2026/2")
+    statuses = {
+        enrollment.student_id: enrollment.status
+        for enrollment in db_session.query(StudentEnrollment).all()
+    }
+
+    assert summary["enrolled"] == 1
+    assert summary["blocked"] == 1
+    assert statuses[complete_student.id] == "enrolled"
+    assert statuses[missing_student.id] == "blocked"
+
+
+def test_solver_selected_alternatives_drive_automatic_enrollment(db_session) -> None:
+    campus = Campus(name="Campus Porto")
+    production = DegreeProgram(name="Engenharia de Producao", code="EP", campus_id=campus.id)
+    civil = DegreeProgram(name="Engenharia Civil", code="EC", campus_id=campus.id)
+    db_session.add(campus)
+    db_session.flush()
+    production.campus_id = campus.id
+    civil.campus_id = campus.id
+    db_session.add_all([production, civil])
+    db_session.flush()
+
+    production_calculus = Course(
+        name="Calculo A Producao",
+        campus_id=campus.id,
+        degree_program_id=production.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=80,
+        context_key="calculo-a",
+        shareable=True,
+    )
+    civil_calculus = Course(
+        name="Calculo A Civil",
+        campus_id=campus.id,
+        degree_program_id=civil.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=80,
+        context_key="calculo-a",
+        shareable=True,
+    )
+    statistics = Course(
+        name="Estatistica",
+        campus_id=campus.id,
+        degree_program_id=production.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=40,
+        context_key="estatistica-engenharia",
+        shareable=True,
+    )
+    calculus_professor = Professor(name="Docente Calculo")
+    statistics_professor = Professor(name="Docente Estatistica")
+    room = Room(name="Sala 50", campus_id=campus.id, capacity=50, kind=RoomKind.lecture)
+    morning = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    afternoon = TimeSlot(day=0, start_minute=600, end_minute=720, label="Seg 10-12")
+    run = OptimizationRun(
+        semester="2026/2",
+        profile="fast",
+        parameters={
+            "student_demand_only": True,
+            "auto_enrollment": True,
+            "attempts": 12,
+            "local_steps": 4,
+        },
+    )
+    db_session.add_all(
+        [
+            production_calculus,
+            civil_calculus,
+            statistics,
+            calculus_professor,
+            statistics_professor,
+            room,
+            morning,
+            afternoon,
+            run,
+        ]
+    )
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProfessorContract(
+                professor_id=calculus_professor.id,
+                min_hours=0,
+                max_hours=4,
+            ),
+            ProfessorContract(
+                professor_id=statistics_professor.id,
+                min_hours=0,
+                max_hours=4,
+            ),
+            ProfessorQualification(
+                professor_id=calculus_professor.id,
+                course_id=production_calculus.id,
+            ),
+            ProfessorQualification(
+                professor_id=statistics_professor.id,
+                course_id=statistics.id,
+            ),
+        ]
+    )
+
+    students = [
+        Student(
+            name=f"Aluno EP {index:02d}",
+            degree_program_id=production.id,
+            current_semester=2,
+            registration_number=f"EP{index:03d}",
+        )
+        for index in range(53)
+    ]
+    db_session.add_all(students)
+    db_session.flush()
+    for index, student in enumerate(students):
+        if index < 50:
+            db_session.add(
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=production_calculus.id,
+                    target_semester="2026/2",
+                    priority=5,
+                    alternative_group=f"calculo-{index}",
+                )
+            )
+        elif index < 52:
+            group = f"reoferta-{index}"
+            db_session.add_all(
+                [
+                    StudentCourseRequest(
+                        student_id=student.id,
+                        course_id=civil_calculus.id,
+                        target_semester="2026/2",
+                        priority=5,
+                        preference_order=1,
+                        alternative_group=group,
+                    ),
+                    StudentCourseRequest(
+                        student_id=student.id,
+                        course_id=statistics.id,
+                        target_semester="2026/2",
+                        priority=5,
+                        preference_order=2,
+                        alternative_group=group,
+                    ),
+                ]
+            )
+        else:
+            db_session.add(
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=statistics.id,
+                    target_semester="2026/2",
+                    priority=5,
+                    alternative_group="estatistica-final",
+                )
+            )
+    db_session.commit()
+
+    result = run_optimization(db_session, run)
+    _maybe_run_automatic_enrollment(db_session, result)
+    db_session.refresh(result)
+
+    enrollments = db_session.query(StudentEnrollment).all()
+    enrolled_by_course: dict[str, int] = {}
+    superseded_reasons: list[str] = []
+    for enrollment in enrollments:
+        if enrollment.status == "enrolled":
+            enrolled_by_course[enrollment.course_id] = enrolled_by_course.get(enrollment.course_id, 0) + 1
+        if enrollment.status == "superseded":
+            superseded_reasons.append(enrollment.reason or "")
+
+    assert result.status == RunStatus.feasible
+    assert result.metrics["hard_conflicts"] == 0
+    assert result.metrics["student_demand_plan"]["alternative_assignments"] == 2
+    assert result.metrics["enrollment_round"]["enrolled"] == 53
+    assert result.metrics["enrollment_round"]["waitlisted"] == 0
+    assert result.metrics["enrollment_round"]["solver_planned_allocations"] == 53
+    assert enrolled_by_course[production_calculus.id] == 50
+    assert enrolled_by_course[statistics.id] == 3
+    assert superseded_reasons == [
+        "Opcao anterior substituida pela escolha otimizada do solver",
+        "Opcao anterior substituida pela escolha otimizada do solver",
+    ]

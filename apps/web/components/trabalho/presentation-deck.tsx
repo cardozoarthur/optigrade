@@ -24,6 +24,7 @@ import {
   Assignment,
   Campus,
   Course,
+  OptimizationRun,
   Professor,
   Room,
   TimeSlot,
@@ -842,7 +843,7 @@ function CalendarPreview({
   );
 }
 
-function plannedSectionsFromMetrics(metrics: Record<string, any> | null | undefined): PlannedSection[] {
+function plannedSectionsFromMetrics(metrics: OptimizationRun["metrics"] | null | undefined): PlannedSection[] {
   const plannedSections = metrics?.planned_sections;
   if (!Array.isArray(plannedSections)) return [];
   return plannedSections.filter(isPlannedSection);

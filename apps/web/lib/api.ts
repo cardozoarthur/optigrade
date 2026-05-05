@@ -114,7 +114,7 @@ export type StudentEnrollment = {
   stage: string;
   status: "enrolled" | "waitlisted" | "superseded" | "blocked";
   score: number;
-  score_breakdown: Record<string, any>;
+  score_breakdown: Record<string, unknown>;
   reason?: string | null;
 };
 
@@ -170,12 +170,37 @@ export type OptimizationRun = {
   status: "pending" | "running" | "feasible" | "infeasible" | "failed";
   semester: string;
   profile: string;
-  metrics: Record<string, any>;
-  pareto_front: Array<Record<string, any>>;
+  metrics: OptimizationMetrics;
+  pareto_front: ParetoSolution[];
   explanation: string | null;
   score: number | null;
   created_at: string;
   finished_at: string | null;
+};
+
+export type OptimizationMetrics = Record<string, unknown> & {
+  hard_conflicts?: number;
+  coverage?: number;
+  min_load_warnings?: number;
+  student_demand_requests?: number;
+  elapsed_ms?: number;
+  enrollment_round?: EnrollmentRoundSummary;
+  planned_sections?: unknown[];
+  student_demand_plan?: {
+    alternative_assignments?: number;
+    unplanned_choice_groups?: number;
+  } & Record<string, unknown>;
+};
+
+export type ParetoSolution = Record<string, unknown> & {
+  rank?: number;
+  score?: number;
+  objectives?: {
+    hard_conflicts?: number;
+    preference_loss?: number;
+    room_waste?: number;
+  } & Record<string, unknown>;
+  explanation?: string;
 };
 
 export type PresentationStats = {
@@ -222,8 +247,8 @@ export type Assignment = {
   time_slot_id: string;
   session_index: number;
   fixed: boolean;
-  hard_violations: Array<Record<string, any>>;
-  soft_violations: Array<Record<string, any>>;
+  hard_violations: Array<Record<string, unknown>>;
+  soft_violations: Array<Record<string, unknown>>;
   origin: string;
 };
 

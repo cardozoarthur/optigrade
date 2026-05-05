@@ -542,3 +542,153 @@ def test_demand_solver_uses_alternatives_to_avoid_tiny_leftover_section(db_sessi
     assert demand_by_name == {"Calculo A": 50, "Fisica I": 3}
     assert snapshot.student_demand_plan["alternative_assignments"] == 2
     assert snapshot.student_demand_plan["unplanned_choice_groups"] == 0
+
+
+def test_demand_driven_solver_prunes_sections_when_teacher_capacity_is_insufficient(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=80,
+    )
+    professor = Professor(name="Docente Calculo")
+    room = Room(name="Sala 50", capacity=50, kind=RoomKind.lecture)
+    available_slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    unavailable_slot = TimeSlot(day=1, start_minute=480, end_minute=600, label="Ter 08-10")
+    run = OptimizationRun(
+        semester="2026/2",
+        profile="fast",
+        parameters={"student_demand_only": True, "attempts": 8, "local_steps": 4},
+    )
+    db_session.add_all([calculus, professor, room, available_slot, unavailable_slot, run])
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=2),
+            ProfessorQualification(professor_id=professor.id, course_id=calculus.id),
+            ProfessorAvailability(
+                professor_id=professor.id,
+                day=0,
+                start_minute=480,
+                end_minute=600,
+                kind=AvailabilityKind.available,
+                strength=ConstraintStrength.hard,
+            ),
+        ]
+    )
+    students = [
+        Student(name=f"Aluno {index:02d}", degree_program_id=program.id, current_semester=1)
+        for index in range(55)
+    ]
+    db_session.add_all(students)
+    db_session.flush()
+    db_session.add_all(
+        [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=calculus.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+            for student in students
+        ]
+    )
+    db_session.commit()
+
+    result = run_optimization(db_session, run)
+    pruning = result.metrics["student_demand_plan"]["teacher_capacity_pruned_sections"]
+    assignment = db_session.query(Assignment).filter(Assignment.run_id == result.id).one()
+
+    assert result.status == "feasible"
+    assert result.metrics["hard_conflicts"] == 0
+    assert result.metrics["assigned_sessions"] == 1
+    assert result.metrics["student_demand_plan"]["teacher_capacity_unplanned_students"] == 5
+    assert len(pruning) == 1
+    assert pruning[0]["planned_students"] == 5
+    assert pruning[0]["reason"].startswith("Capacidade docente indisponivel")
+    assert result.metrics["planned_sections"][0]["planned_students"] == 50
+    assert assignment.time_slot_id == available_slot.id
+
+
+def test_solver_respects_multiple_hard_availability_windows_in_the_same_day(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Computacao", code="CC")
+    db_session.add(program)
+    db_session.flush()
+    algorithms = Course(
+        name="Algoritmos",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    data_structures = Course(
+        name="Estruturas de Dados",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    professor = Professor(name="Docente Computacao")
+    room = Room(name="Sala", capacity=30, kind=RoomKind.lecture)
+    morning = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    afternoon = TimeSlot(day=0, start_minute=840, end_minute=960, label="Seg 14-16")
+    blocked = TimeSlot(day=1, start_minute=480, end_minute=600, label="Ter 08-10")
+    run = OptimizationRun(
+        semester="2026/2",
+        profile="fast",
+        parameters={"attempts": 8, "local_steps": 4},
+    )
+    db_session.add_all(
+        [algorithms, data_structures, professor, room, morning, afternoon, blocked, run]
+    )
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4),
+            ProfessorQualification(professor_id=professor.id, course_id=algorithms.id),
+            ProfessorQualification(professor_id=professor.id, course_id=data_structures.id),
+            ProfessorAvailability(
+                professor_id=professor.id,
+                day=0,
+                start_minute=480,
+                end_minute=600,
+                kind=AvailabilityKind.available,
+                strength=ConstraintStrength.hard,
+            ),
+            ProfessorAvailability(
+                professor_id=professor.id,
+                day=0,
+                start_minute=840,
+                end_minute=960,
+                kind=AvailabilityKind.available,
+                strength=ConstraintStrength.hard,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    result = run_optimization(db_session, run)
+    assigned_slot_ids = {
+        assignment.time_slot_id
+        for assignment in db_session.query(Assignment).filter(Assignment.run_id == result.id).all()
+    }
+
+    assert result.status == "feasible"
+    assert result.metrics["hard_conflicts"] == 0
+    assert result.metrics["assigned_sessions"] == 2
+    assert assigned_slot_ids == {morning.id, afternoon.id}
+    assert blocked.id not in assigned_slot_ids

@@ -105,6 +105,21 @@ def run_enrollment_round(
         )
 
     allocated_by_group: dict[tuple[str, str], EnrollmentCandidate] = {}
+    solver_planned_request_ids = planned_request_ids_for_run(db, run_id)
+    solver_planned_allocations = 0
+    if solver_planned_request_ids:
+        for group, values in candidates_by_group.items():
+            planned = next(
+                (candidate for candidate in values if candidate.request.id in solver_planned_request_ids),
+                None,
+            )
+            if not planned:
+                continue
+            if candidate_has_capacity(planned, capacity_plan, used_by_bucket, capacity_by_course):
+                allocated_by_group[group] = planned
+                reserve_candidate_capacity(planned, capacity_plan, used_by_bucket)
+                solver_planned_allocations += 1
+
     max_order = max(
         (candidate.request.preference_order for values in candidates_by_group.values() for candidate in values),
         default=0,
@@ -133,16 +148,10 @@ def run_enrollment_round(
             )
             if group in allocated_by_group:
                 continue
-            bucket_id = capacity_plan.bucket_by_course.get(candidate.course.id, candidate.course.id)
-            capacity = capacity_plan.capacity_by_bucket.get(
-                bucket_id,
-                capacity_by_course.get(candidate.course.id, candidate.course.expected_demand),
-            )
-            used = used_by_bucket.get(bucket_id, 0)
-            if used >= capacity:
+            if not candidate_has_capacity(candidate, capacity_plan, used_by_bucket, capacity_by_course):
                 continue
             allocated_by_group[group] = candidate
-            used_by_bucket[bucket_id] = used + 1
+            reserve_candidate_capacity(candidate, capacity_plan, used_by_bucket)
 
     enrolled = 0
     waitlisted = 0
@@ -162,7 +171,11 @@ def run_enrollment_round(
             elif allocated:
                 superseded += 1
                 status = EnrollmentStatus.superseded.value
-                reason = "Alternativa posterior descartada porque uma opcao anterior foi alocada"
+                reason = (
+                    "Opcao anterior substituida pela escolha otimizada do solver"
+                    if candidate.request.preference_order < allocated.request.preference_order
+                    else "Alternativa posterior descartada porque uma opcao anterior foi alocada"
+                )
             else:
                 waitlisted += 1
                 waitlisted_by_course[candidate.course.id] = (
@@ -198,11 +211,48 @@ def run_enrollment_round(
         "bucket_by_course": capacity_plan.bucket_by_course,
         "enrolled_by_course": enrolled_by_course,
         "waitlisted_by_course": waitlisted_by_course,
+        "solver_planned_allocations": solver_planned_allocations,
     }
 
 
 def course_capacity_by_id(db: Session, run_id: str | None) -> dict[str, int]:
     return course_capacity_plan(db, run_id).capacity_by_course
+
+
+def candidate_has_capacity(
+    candidate: EnrollmentCandidate,
+    capacity_plan: EnrollmentCapacityPlan,
+    used_by_bucket: dict[str, int],
+    capacity_by_course: dict[str, int],
+) -> bool:
+    bucket_id = capacity_plan.bucket_by_course.get(candidate.course.id, candidate.course.id)
+    capacity = capacity_plan.capacity_by_bucket.get(
+        bucket_id,
+        capacity_by_course.get(candidate.course.id, candidate.course.expected_demand),
+    )
+    return used_by_bucket.get(bucket_id, 0) < capacity
+
+
+def reserve_candidate_capacity(
+    candidate: EnrollmentCandidate,
+    capacity_plan: EnrollmentCapacityPlan,
+    used_by_bucket: dict[str, int],
+) -> None:
+    bucket_id = capacity_plan.bucket_by_course.get(candidate.course.id, candidate.course.id)
+    used_by_bucket[bucket_id] = used_by_bucket.get(bucket_id, 0) + 1
+
+
+def planned_request_ids_for_run(db: Session, run_id: str | None) -> set[str]:
+    if not run_id:
+        return set()
+    run = db.get(OptimizationRun, run_id)
+    demand_plan = (run.metrics or {}).get("student_demand_plan") if run else None
+    if not isinstance(demand_plan, dict):
+        return set()
+    request_ids = demand_plan.get("selected_request_ids")
+    if not isinstance(request_ids, list):
+        return set()
+    return {request_id for request_id in request_ids if isinstance(request_id, str)}
 
 
 def course_capacity_plan(db: Session, run_id: str | None) -> EnrollmentCapacityPlan:
