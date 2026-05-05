@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import (
     Assignment,
+    ConstraintStrength,
     Course,
     CourseRestrictionKind,
     EnrollmentStatus,
@@ -164,6 +165,21 @@ def run_enrollment_round(
             allocated_by_group[group] = branch
             reserve_branch_capacity(branch, capacity_plan, used_by_bucket)
 
+    students_without_enrollment_before_rescue = students_without_enrollment_count(
+        candidates_by_group,
+        allocated_by_group,
+        rescue_allocations={},
+    )
+    rescue_allocations, rescue_displacements = rescue_students_without_enrollment(
+        candidates_by_group,
+        allocated_by_group,
+        capacity_plan,
+        used_by_bucket,
+        capacity_by_course,
+        assignment_windows,
+    )
+    rescue_request_ids = set(rescue_allocations)
+
     enrolled = 0
     waitlisted = 0
     superseded = 0
@@ -183,6 +199,13 @@ def run_enrollment_round(
                 )
                 status = EnrollmentStatus.enrolled.value
                 reason = "Alocado pela rodada automatica"
+            elif candidate.request.id in rescue_request_ids:
+                enrolled += 1
+                enrolled_by_course[candidate.course.id] = (
+                    enrolled_by_course.get(candidate.course.id, 0) + 1
+                )
+                status = EnrollmentStatus.enrolled.value
+                reason = "Alocado em turma de resgate para evitar semestre sem matricula"
             elif allocated:
                 superseded += 1
                 status = EnrollmentStatus.superseded.value
@@ -228,6 +251,14 @@ def run_enrollment_round(
         "enrolled_by_course": enrolled_by_course,
         "waitlisted_by_course": waitlisted_by_course,
         "solver_planned_allocations": solver_planned_allocations,
+        "rescue_enrolled": len(rescue_allocations),
+        "rescue_displaced_allocations": rescue_displacements,
+        "students_without_enrollment_before_rescue": students_without_enrollment_before_rescue,
+        "students_without_enrollment_after_rescue": students_without_enrollment_count(
+            candidates_by_group,
+            allocated_by_group,
+            rescue_allocations=rescue_allocations,
+        ),
     }
 
 
@@ -292,6 +323,180 @@ def branch_preference_order(branch: list[EnrollmentCandidate] | None) -> int | N
     if not branch:
         return None
     return min(candidate.request.preference_order for candidate in branch)
+
+
+def rescue_students_without_enrollment(
+    candidates_by_group: dict[tuple[str, str], list[EnrollmentCandidate]],
+    allocated_by_group: dict[tuple[str, str], list[EnrollmentCandidate]],
+    capacity_plan: EnrollmentCapacityPlan,
+    used_by_bucket: dict[str, int],
+    capacity_by_course: dict[str, int],
+    assignment_windows: dict[str, list[tuple[int, int, int]]] | None,
+) -> tuple[dict[str, EnrollmentCandidate], list[dict[str, Any]]]:
+    allocated_student_ids = {
+        candidate.student.id
+        for branch in allocated_by_group.values()
+        for candidate in branch
+    }
+    candidates_by_student: dict[str, list[EnrollmentCandidate]] = {}
+    for (student_id, _group), candidates in candidates_by_group.items():
+        if student_id in allocated_student_ids:
+            continue
+        unique_by_request = {
+            candidate.request.id: candidate
+            for candidate in candidates
+        }
+        candidates_by_student.setdefault(student_id, []).extend(unique_by_request.values())
+
+    student_ids = sorted(
+        candidates_by_student,
+        key=lambda student_id: (
+            -max(candidate.student.current_semester for candidate in candidates_by_student[student_id]),
+            -max(candidate.score for candidate in candidates_by_student[student_id]),
+            min(
+                candidate.student.registration_number or candidate.student.name
+                for candidate in candidates_by_student[student_id]
+            ),
+        ),
+    )
+    rescue_allocations: dict[str, EnrollmentCandidate] = {}
+    displacements: list[dict[str, Any]] = []
+    for student_id in student_ids:
+        candidates = sorted(
+            candidates_by_student[student_id],
+            key=lambda candidate: (
+                candidate.request.preference_order,
+                -candidate.request.priority,
+                -candidate.score,
+                candidate.request.created_at,
+                candidate.course.name,
+            ),
+        )
+        for candidate in candidates:
+            if not candidate_has_capacity(
+                candidate,
+                capacity_plan,
+                used_by_bucket,
+                capacity_by_course,
+                assignment_windows,
+            ):
+                continue
+            rescue_allocations[candidate.request.id] = candidate
+            reserve_candidate_capacity(candidate, capacity_plan, used_by_bucket)
+            break
+        if any(candidate.student.id == student_id for candidate in rescue_allocations.values()):
+            continue
+        for candidate in candidates:
+            displacement = displace_redundant_allocation_for_candidate(
+                candidate,
+                allocated_by_group,
+                capacity_plan,
+                used_by_bucket,
+                capacity_by_course,
+                assignment_windows,
+            )
+            if displacement is None:
+                continue
+            rescue_allocations[candidate.request.id] = candidate
+            reserve_candidate_capacity(candidate, capacity_plan, used_by_bucket)
+            allocated_by_group[(candidate.student.id, f"rescue:{candidate.request.id}")] = [candidate]
+            displacements.append(displacement)
+            break
+    return rescue_allocations, displacements
+
+
+def displace_redundant_allocation_for_candidate(
+    candidate: EnrollmentCandidate,
+    allocated_by_group: dict[tuple[str, str], list[EnrollmentCandidate]],
+    capacity_plan: EnrollmentCapacityPlan,
+    used_by_bucket: dict[str, int],
+    capacity_by_course: dict[str, int],
+    assignment_windows: dict[str, list[tuple[int, int, int]]] | None,
+) -> dict[str, Any] | None:
+    bucket_id = capacity_plan.bucket_by_course.get(candidate.course.id, candidate.course.id)
+    if assignment_windows is not None and not request_time_is_scheduled(
+        candidate.request,
+        assignment_windows.get(bucket_id, []),
+    ):
+        return None
+
+    allocated_count_by_student: dict[str, int] = {}
+    for branch in allocated_by_group.values():
+        for allocated_candidate in branch:
+            allocated_count_by_student[allocated_candidate.student.id] = (
+                allocated_count_by_student.get(allocated_candidate.student.id, 0) + 1
+            )
+
+    victim_groups = sorted(
+        (
+            (group, branch)
+            for group, branch in allocated_by_group.items()
+            if any(
+                capacity_plan.bucket_by_course.get(item.course.id, item.course.id) == bucket_id
+                for item in branch
+            )
+            and branch[0].student.id != candidate.student.id
+            and allocated_count_by_student.get(branch[0].student.id, 0) - len(branch) >= 1
+        ),
+        key=lambda item: (
+            branch_score(item[1]),
+            branch_priority(item[1]),
+            -len(item[1]),
+            item[1][0].student.current_semester,
+            item[1][0].student.registration_number or item[1][0].student.name,
+        ),
+    )
+    for victim_group, victim_branch in victim_groups:
+        release_branch_capacity(victim_branch, capacity_plan, used_by_bucket)
+        if candidate_has_capacity(
+            candidate,
+            capacity_plan,
+            used_by_bucket,
+            capacity_by_course,
+            assignment_windows,
+        ):
+            allocated_by_group.pop(victim_group, None)
+            return {
+                "rescued_student_id": candidate.student.id,
+                "rescued_request_id": candidate.request.id,
+                "rescued_course_id": candidate.course.id,
+                "displaced_student_id": victim_branch[0].student.id,
+                "displaced_request_ids": [item.request.id for item in victim_branch],
+                "reason": (
+                    "Vaga realocada de aluno ja atendido para evitar aluno sem nenhuma turma."
+                ),
+            }
+        reserve_branch_capacity(victim_branch, capacity_plan, used_by_bucket)
+    return None
+
+
+def release_branch_capacity(
+    branch: list[EnrollmentCandidate],
+    capacity_plan: EnrollmentCapacityPlan,
+    used_by_bucket: dict[str, int],
+) -> None:
+    for candidate in branch:
+        bucket_id = capacity_plan.bucket_by_course.get(candidate.course.id, candidate.course.id)
+        used_by_bucket[bucket_id] = max(0, used_by_bucket.get(bucket_id, 0) - 1)
+
+
+def students_without_enrollment_count(
+    candidates_by_group: dict[tuple[str, str], list[EnrollmentCandidate]],
+    allocated_by_group: dict[tuple[str, str], list[EnrollmentCandidate]],
+    *,
+    rescue_allocations: dict[str, EnrollmentCandidate],
+) -> int:
+    student_ids = {student_id for student_id, _group in candidates_by_group}
+    allocated_student_ids = {
+        candidate.student.id
+        for branch in allocated_by_group.values()
+        for candidate in branch
+    }
+    rescued_student_ids = {
+        candidate.student.id
+        for candidate in rescue_allocations.values()
+    }
+    return len(student_ids - allocated_student_ids - rescued_student_ids)
 
 
 def candidate_has_capacity(
@@ -360,6 +565,8 @@ def request_time_is_scheduled(
     request: StudentCourseRequest,
     assignment_windows: list[tuple[int, int, int]],
 ) -> bool:
+    if request.time_preference_strength != ConstraintStrength.hard:
+        return True
     if (
         request.desired_day is None
         or request.desired_start_minute is None

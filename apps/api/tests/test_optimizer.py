@@ -159,6 +159,99 @@ def test_regular_curriculum_course_respects_degree_program_window(db_session) ->
     assert assignment.time_slot_id == night.id
 
 
+def test_demand_planner_adds_implicit_regular_offer_for_eligible_student(db_session) -> None:
+    program = DegreeProgram(
+        name="Engenharia de Producao",
+        code="EP",
+        schedule_start_minute=19 * 60,
+        schedule_end_minute=22 * 60,
+    )
+    db_session.add(program)
+    db_session.flush()
+    course = Course(
+        name="Pesquisa Operacional",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=4,
+        expected_demand=20,
+    )
+    student = Student(name="Aluno Regular", degree_program_id=program.id, current_semester=4)
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=20, kind=RoomKind.lecture)
+    night = TimeSlot(day=0, start_minute=19 * 60, end_minute=21 * 60, label="Seg 19-21")
+    db_session.add_all([course, student, professor, room, night])
+    db_session.flush()
+    db_session.add(ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4))
+    db_session.add(ProfessorQualification(professor_id=professor.id, course_id=course.id))
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+
+    assert len(snapshot.courses) == 1
+    assert snapshot.courses[0].name == "Pesquisa Operacional"
+    assert snapshot.courses[0].expected_demand == 1
+    assert snapshot.courses[0].regular_time_windows == ((19 * 60, 22 * 60),)
+    assert snapshot.courses[0].section_strategy == "forced_minimum_coverage_section"
+    assert snapshot.student_demand_requests == 0
+    assert snapshot.student_demand_plan["mandatory_regular_floor_added_by_course"] == {course.id: 1}
+    assert diagnose_snapshot(snapshot) == []
+
+
+def test_regular_offer_forces_teacher_availability_when_no_official_window_matches(
+    db_session,
+) -> None:
+    program = DegreeProgram(
+        name="Engenharia de Producao",
+        code="EP",
+        schedule_start_minute=8 * 60,
+        schedule_end_minute=12 * 60,
+    )
+    db_session.add(program)
+    db_session.flush()
+    course = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    student = Student(name="Aluno Regular", degree_program_id=program.id, current_semester=1)
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=20, kind=RoomKind.lecture)
+    morning = TimeSlot(day=0, start_minute=8 * 60, end_minute=10 * 60, label="Seg 08-10")
+    db_session.add_all([course, student, professor, room, morning])
+    db_session.flush()
+    db_session.add(ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4))
+    db_session.add(ProfessorQualification(professor_id=professor.id, course_id=course.id))
+    db_session.add(
+        ProfessorAvailability(
+            professor_id=professor.id,
+            day=1,
+            start_minute=14 * 60,
+            end_minute=18 * 60,
+            kind=AvailabilityKind.available,
+            strength=ConstraintStrength.hard,
+        )
+    )
+    run = OptimizationRun(
+        profile="fast",
+        parameters={"student_demand_only": True, "attempts": 4, "local_steps": 2},
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    result = run_optimization(db_session, run)
+    assignment = db_session.query(Assignment).filter(Assignment.run_id == result.id).one()
+
+    assert result.metrics["hard_conflicts"] == 0
+    assert assignment.time_slot_id == morning.id
+    assert assignment.soft_violations[0]["code"] == "forced_regular_teacher_availability"
+
+
 def test_course_uses_room_in_compatible_campus(db_session) -> None:
     anglo = Campus(name="Campus Anglo")
     capao = Campus(name="Campus Capao")
@@ -519,6 +612,153 @@ def test_courses_with_teacher_suffix_are_planned_as_one_offer(db_session) -> Non
     assert shared_course.id in snapshot.qualifications[professor_four.id]
 
 
+def test_demand_planner_closes_marginal_course_when_second_option_absorbs_students(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=3,
+    )
+    physics = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=3,
+    )
+    professor = Professor(name="Docente Fisica")
+    room = Room(name="Sala 50", capacity=50, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    db_session.add_all([calculus, physics, professor, room, slot])
+    db_session.flush()
+    db_session.add(ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=6))
+    db_session.add(ProfessorQualification(professor_id=professor.id, course_id=physics.id))
+    calculus_students = [
+        Student(name=f"Aluno Calculo {index}", degree_program_id=program.id, current_semester=2)
+        for index in range(3)
+    ]
+    physics_students = [
+        Student(name=f"Aluno Fisica {index}", degree_program_id=program.id, current_semester=2)
+        for index in range(3)
+    ]
+    db_session.add_all([*calculus_students, *physics_students])
+    db_session.flush()
+    for index, student in enumerate(calculus_students):
+        db_session.add_all(
+            [
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=calculus.id,
+                    target_semester="2026/2",
+                    alternative_group=f"trajetoria-{index}",
+                    preference_order=1,
+                    priority=5,
+                ),
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=physics.id,
+                    target_semester="2026/2",
+                    alternative_group=f"trajetoria-{index}",
+                    preference_order=2,
+                    priority=5,
+                ),
+            ]
+        )
+    for student in physics_students:
+        db_session.add(
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=physics.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+        )
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, demand_driven=True)
+
+    assert [course.name for course in snapshot.courses] == ["Fisica I"]
+    assert snapshot.courses[0].expected_demand == 6
+    assert snapshot.student_demand_plan["selected_demand_by_course"] == {physics.id: 6}
+    assert snapshot.student_demand_plan["alternative_assignments"] == 3
+    assert snapshot.student_demand_plan["consolidated_choice_groups"] == 3
+    assert snapshot.student_demand_plan["unplanned_choice_groups"] == 0
+    assert diagnose_snapshot(snapshot) == []
+
+
+def test_demand_planner_restores_one_small_section_to_avoid_empty_student_semester(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    algebra = Course(
+        name="Algebra Linear",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    structures = Course(
+        name="Estruturas de Dados",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    student = Student(name="Aluno sem turma", degree_program_id=program.id, current_semester=2)
+    professor = Professor(name="Docente")
+    room = Room(name="Sala 20", capacity=20, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    db_session.add_all([algebra, structures, student, professor, room, slot])
+    db_session.flush()
+    db_session.add(ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4))
+    db_session.add_all(
+        [
+            ProfessorQualification(professor_id=professor.id, course_id=algebra.id),
+            ProfessorQualification(professor_id=professor.id, course_id=structures.id),
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=algebra.id,
+                target_semester="2026/2",
+                preference_order=1,
+                priority=5,
+            ),
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=structures.id,
+                target_semester="2026/2",
+                preference_order=2,
+                priority=5,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, demand_driven=True)
+
+    assert len(snapshot.courses) == 1
+    assert snapshot.courses[0].expected_demand == 1
+    assert snapshot.courses[0].section_strategy == "forced_minimum_coverage_section"
+    assert snapshot.student_demand_plan["minimum_coverage_restored_groups"] == 1
+    assert snapshot.student_demand_plan["unplanned_choice_groups"] == 1
+    assert diagnose_snapshot(snapshot) == []
+
+
 def test_planned_sections_are_balanced_when_multiple_classes_are_opened() -> None:
     assert planned_section_sizes_from_capacity(60, 50, 0) == (
         [30, 30],
@@ -621,7 +861,7 @@ def test_demand_solver_uses_alternatives_to_avoid_tiny_leftover_section(db_sessi
         workload_hours=2,
         theoretical_hours=2,
         kind=CourseKind.mandatory,
-        recommended_semester=2,
+        recommended_semester=1,
         expected_demand=20,
     )
     physics = Course(
@@ -630,7 +870,7 @@ def test_demand_solver_uses_alternatives_to_avoid_tiny_leftover_section(db_sessi
         workload_hours=2,
         theoretical_hours=2,
         kind=CourseKind.mandatory,
-        recommended_semester=2,
+        recommended_semester=1,
         expected_demand=20,
     )
     room = Room(name="Sala regular", capacity=50, kind=RoomKind.lecture)
@@ -705,7 +945,7 @@ def test_demand_solver_selects_complex_conditional_bundle_instead_of_single_cour
         workload_hours=2,
         theoretical_hours=2,
         kind=CourseKind.mandatory,
-        recommended_semester=2,
+        recommended_semester=1,
         expected_demand=20,
     )
     algebra = Course(
@@ -714,7 +954,7 @@ def test_demand_solver_selects_complex_conditional_bundle_instead_of_single_cour
         workload_hours=2,
         theoretical_hours=2,
         kind=CourseKind.mandatory,
-        recommended_semester=2,
+        recommended_semester=1,
         expected_demand=20,
     )
     geometry = Course(
@@ -723,7 +963,7 @@ def test_demand_solver_selects_complex_conditional_bundle_instead_of_single_cour
         workload_hours=2,
         theoretical_hours=2,
         kind=CourseKind.mandatory,
-        recommended_semester=2,
+        recommended_semester=1,
         expected_demand=20,
     )
     international_relations = Course(
@@ -750,7 +990,7 @@ def test_demand_solver_selects_complex_conditional_bundle_instead_of_single_cour
         workload_hours=2,
         theoretical_hours=2,
         kind=CourseKind.mandatory,
-        recommended_semester=2,
+        recommended_semester=1,
         expected_demand=20,
     )
     room = Room(name="Sala regular", capacity=50, kind=RoomKind.lecture)

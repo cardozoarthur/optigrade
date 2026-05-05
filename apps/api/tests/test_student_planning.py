@@ -399,7 +399,7 @@ def test_demand_driven_snapshot_only_keeps_requested_courses(db_session) -> None
     assert snapshot.student_demand_requests == 3
 
 
-def test_demand_solver_does_not_open_tiny_section(db_session) -> None:
+def test_demand_solver_opens_tiny_regular_section_when_needed(db_session) -> None:
     program = DegreeProgram(name="Computacao", code="CC")
     db_session.add(program)
     db_session.flush()
@@ -433,9 +433,13 @@ def test_demand_solver_does_not_open_tiny_section(db_session) -> None:
 
     snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
 
-    assert snapshot.courses == []
+    assert len(snapshot.courses) == 1
+    assert snapshot.courses[0].name == "Banco de Dados"
+    assert snapshot.courses[0].expected_demand == 2
+    assert snapshot.courses[0].section_strategy == "forced_minimum_coverage_section"
     assert snapshot.student_demand_requests == 2
-    assert snapshot.student_demand_plan["unplanned_choice_groups"] == 2
+    assert snapshot.student_demand_plan["minimum_coverage_restored_groups"] == 0
+    assert snapshot.student_demand_plan["unplanned_choice_groups"] == 0
 
 
 def test_ineligible_student_request_does_not_increase_solver_demand(db_session) -> None:

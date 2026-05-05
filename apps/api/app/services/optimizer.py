@@ -48,6 +48,7 @@ from app.services.course_identity import (
 
 PLANNING_SECTION_CAPACITY = 50
 PLANNING_MIN_SECTION_DEMAND = 3
+DEMAND_SECTION_COST = 90.0
 SECTION_SESSION_OFFSET = 100
 
 
@@ -193,6 +194,7 @@ class DemandPlan:
     demand_by_course: dict[str, int]
     first_choice_demand_by_course: dict[str, int]
     all_eligible_demand_by_course: dict[str, int]
+    regular_demand_by_course: dict[str, int]
     selected_choices: dict[tuple[str, str], DemandChoiceBundle]
     unplanned_choices: dict[tuple[str, str], DemandChoiceBundle]
     alternative_assignments: int
@@ -232,6 +234,26 @@ def run_optimization(db: Session, run: OptimizationRun) -> OptimizationRun:
         db.refresh(run)
         return run
 
+    run.metrics = {
+        "optimization_status": RunStatus.running.value,
+        "semester": run.semester,
+        "profile": profile,
+        "student_demand_only": demand_driven,
+        "student_demand_requests": snapshot.student_demand_requests,
+        "student_demand_raw_requests": snapshot.student_demand_raw_requests,
+        "student_demand_blocked_requests": snapshot.student_demand_blocked_requests,
+        "student_regular_requests": snapshot.student_regular_requests,
+        "student_reoffer_requests": snapshot.student_reoffer_requests,
+        "student_elective_requests": snapshot.student_elective_requests,
+        "student_demand_plan": snapshot.student_demand_plan or {},
+        "planned_sections": planned_sections_metrics(snapshot),
+        "snapshot_courses": len(snapshot.courses),
+        "snapshot_professors": len(snapshot.professors),
+        "snapshot_rooms": len(snapshot.rooms),
+        "snapshot_slots": len(snapshot.slots),
+    }
+    db.commit()
+
     if profile == "official_ufpel":
         ranked = [build_official_schedule_solution(snapshot)]
         best = ranked[0]
@@ -240,8 +262,12 @@ def run_optimization(db: Session, run: OptimizationRun) -> OptimizationRun:
         attempts = int(params["attempts"])
         local_steps = int(params["local_steps"])
         if large_instance:
-            attempts = min(attempts, 16)
-            local_steps = min(local_steps, 40)
+            if len(snapshot.courses) >= 500 or snapshot.student_demand_requests >= 10_000:
+                attempts = min(attempts, 4)
+                local_steps = min(local_steps, 16)
+            else:
+                attempts = min(attempts, 16)
+                local_steps = min(local_steps, 40)
         max_worker_cap = 4 if large_instance else 24
         max_workers = max(1, min(settings.optigrade_max_threads, attempts, max_worker_cap))
         seeds = [random.randrange(1_000_000_000) for _ in range(attempts)]
@@ -449,6 +475,7 @@ def build_snapshot(
         requested_demand_by_course,
         rooms,
         requested_time_windows_by_course=requested_time_windows_by_course,
+        regular_demand_by_course=demand_plan.regular_demand_by_course,
         demand_driven=demand_driven,
     )
     professors = [
@@ -587,10 +614,9 @@ def solve_student_demand_plan(
     demand_driven: bool,
 ) -> DemandPlan:
     ordered_choices = choice_summary.bundles_by_group
-    allocations = {
-        group: bundles[0]
-        for group, bundles in ordered_choices.items()
-        if bundles
+    allocations = initial_demand_allocations(ordered_choices)
+    protected_groups = {
+        group for group, bundle in allocations.items() if mandatory_regular_bundle(bundle)
     }
     course_by_id = {course.id: course for course in raw_courses}
     bucket_by_course = {
@@ -605,14 +631,34 @@ def solve_student_demand_plan(
             allocations,
             bucket_by_course,
             buckets,
+            protected_groups=protected_groups,
         )
+        allocations, consolidation_events = consolidate_single_section_buckets(
+            ordered_choices,
+            allocations,
+            bucket_by_course,
+            buckets,
+            protected_groups=protected_groups,
+        )
+    else:
+        consolidation_events = []
 
     selected_choices, unplanned_choices = suppress_unviable_small_remainders(
         allocations,
         bucket_by_course,
         buckets,
+        protected_groups=protected_groups,
     )
-    demand_by_course = demand_from_bundle_allocations(selected_choices.values())
+    selected_choices, unplanned_choices, minimum_coverage_events = restore_minimum_student_coverage(
+        selected_choices,
+        unplanned_choices,
+    )
+    selected_request_demand_by_course = demand_from_bundle_allocations(selected_choices.values())
+    regular_demand_by_course = choice_summary.regular_eligible_demand_by_course if demand_driven else {}
+    demand_by_course, mandatory_regular_floor = apply_mandatory_regular_demand_floor(
+        selected_request_demand_by_course,
+        regular_demand_by_course,
+    )
     first_choice_demand = choice_summary.first_choice_demand_by_course
     alternative_assignments = sum(
         1
@@ -650,8 +696,16 @@ def solve_student_demand_plan(
             if len(bundle.choices) > 1
         ),
         "alternative_assignments": alternative_assignments,
+        "consolidated_choice_groups": sum(len(item["moved_groups"]) for item in consolidation_events),
+        "consolidated_closed_buckets": consolidation_events,
+        "minimum_coverage_restored_groups": len(minimum_coverage_events),
+        "minimum_coverage_restored": minimum_coverage_events,
+        "mandatory_regular_choice_groups": len(protected_groups),
+        "mandatory_regular_demand_by_course": regular_demand_by_course,
+        "mandatory_regular_floor_added_by_course": mandatory_regular_floor,
         "first_choice_demand_by_course": first_choice_demand,
         "all_eligible_demand_by_course": choice_summary.all_eligible_demand_by_course,
+        "selected_student_request_demand_by_course": selected_request_demand_by_course,
         "selected_demand_by_course": demand_by_course,
         "unplanned_demand_by_course": demand_from_bundle_allocations(unplanned_choices.values()),
         "selected_request_ids": selected_request_ids,
@@ -662,6 +716,7 @@ def solve_student_demand_plan(
         demand_by_course=demand_by_course,
         first_choice_demand_by_course=first_choice_demand,
         all_eligible_demand_by_course=choice_summary.all_eligible_demand_by_course,
+        regular_demand_by_course=regular_demand_by_course,
         selected_choices=selected_choices,
         unplanned_choices=unplanned_choices,
         alternative_assignments=alternative_assignments,
@@ -743,13 +798,52 @@ def selected_time_windows_by_course(
     }
 
 
+def initial_demand_allocations(
+    ordered_choices: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]],
+) -> dict[tuple[str, str], DemandChoiceBundle]:
+    allocations: dict[tuple[str, str], DemandChoiceBundle] = {}
+    for group, bundles in ordered_choices.items():
+        if not bundles:
+            continue
+        mandatory_regular = next(
+            (bundle for bundle in bundles if mandatory_regular_bundle(bundle)),
+            None,
+        )
+        allocations[group] = mandatory_regular or bundles[0]
+    return allocations
+
+
+def mandatory_regular_bundle(bundle: DemandChoiceBundle) -> bool:
+    return any(choice.relation == "regular" for choice in bundle.choices)
+
+
+def apply_mandatory_regular_demand_floor(
+    selected_request_demand_by_course: dict[str, int],
+    regular_demand_by_course: dict[str, int],
+) -> tuple[dict[str, int], dict[str, int]]:
+    demand_by_course = dict(selected_request_demand_by_course)
+    added_floor: dict[str, int] = {}
+    for course_id, regular_demand in regular_demand_by_course.items():
+        if regular_demand <= 0:
+            continue
+        selected_demand = demand_by_course.get(course_id, 0)
+        if selected_demand >= regular_demand:
+            continue
+        demand_by_course[course_id] = regular_demand
+        added_floor[course_id] = regular_demand - selected_demand
+    return demand_by_course, added_floor
+
+
 def optimize_student_choice_allocations(
     ordered_choices: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]],
     initial_allocations: dict[tuple[str, str], DemandChoiceBundle],
     bucket_by_course: dict[str, tuple[Any, ...]],
     buckets: dict[tuple[Any, ...], DemandPlanningBucket],
+    *,
+    protected_groups: set[tuple[str, str]] | None = None,
 ) -> dict[tuple[str, str], DemandChoiceBundle]:
     allocations = dict(initial_allocations)
+    protected_groups = protected_groups or set()
     course_demand = demand_from_bundle_allocations(allocations.values())
     bucket_demand = bucket_demand_from_course_demand(course_demand, bucket_by_course)
 
@@ -772,6 +866,7 @@ def optimize_student_choice_allocations(
                 bucket_by_course,
                 buckets,
                 bucket_demand,
+                protected_groups=protected_groups,
             )
             if batch_move:
                 for group, alternative in batch_move:
@@ -783,6 +878,7 @@ def optimize_student_choice_allocations(
             group_keys = [
                 group
                 for group, bundle in allocations.items()
+                if group not in protected_groups
                 if bundle_bucket_demand(bundle, bucket_by_course).get(bucket_key, 0) > 0
             ]
             group_keys.sort(
@@ -826,6 +922,160 @@ def optimize_student_choice_allocations(
     return allocations
 
 
+def consolidate_single_section_buckets(
+    ordered_choices: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]],
+    initial_allocations: dict[tuple[str, str], DemandChoiceBundle],
+    bucket_by_course: dict[str, tuple[Any, ...]],
+    buckets: dict[tuple[Any, ...], DemandPlanningBucket],
+    *,
+    protected_groups: set[tuple[str, str]] | None = None,
+) -> tuple[dict[tuple[str, str], DemandChoiceBundle], list[dict[str, Any]]]:
+    allocations = dict(initial_allocations)
+    protected_groups = protected_groups or set()
+    events: list[dict[str, Any]] = []
+
+    for _round in range(8):
+        bucket_demand = bucket_demand_from_course_demand(
+            demand_from_bundle_allocations(allocations.values()),
+            bucket_by_course,
+        )
+        closed_bucket = False
+        candidate_buckets = sorted(
+            (
+                (bucket_demand.get(bucket_key, 0), bucket_key, bucket)
+                for bucket_key, bucket in buckets.items()
+            ),
+            key=lambda item: (item[0], str(item[1])),
+        )
+        for demand, bucket_key, bucket in candidate_buckets:
+            if demand <= 0 or demand > bucket.regular_capacity:
+                continue
+            sizes, unserved, _strategy = planned_section_sizes_from_capacity(
+                demand,
+                bucket.regular_capacity,
+                bucket.large_capacity,
+            )
+            if len(sizes) != 1 or unserved > 0:
+                continue
+            move = bucket_closure_move(
+                bucket_key,
+                ordered_choices,
+                allocations,
+                bucket_by_course,
+                buckets,
+                bucket_demand,
+                protected_groups=protected_groups,
+            )
+            if not move:
+                continue
+            for group, alternative in move["moves"]:
+                allocations[group] = alternative
+            events.append(
+                {
+                    "bucket": bucket.label,
+                    "selected_demand_before": demand,
+                    "delta": round(float(move["delta"]), 3),
+                    "moved_groups": [group for group, _alternative in move["moves"]],
+                }
+            )
+            closed_bucket = True
+            break
+        if not closed_bucket:
+            break
+    return allocations, events
+
+
+def bucket_closure_move(
+    source_bucket_key: tuple[Any, ...],
+    ordered_choices: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]],
+    allocations: dict[tuple[str, str], DemandChoiceBundle],
+    bucket_by_course: dict[str, tuple[Any, ...]],
+    buckets: dict[tuple[Any, ...], DemandPlanningBucket],
+    bucket_demand: dict[tuple[Any, ...], int],
+    *,
+    protected_groups: set[tuple[str, str]] | None = None,
+) -> dict[str, Any] | None:
+    protected_groups = protected_groups or set()
+    source_groups = [
+        group
+        for group, bundle in allocations.items()
+        if bundle_bucket_demand(bundle, bucket_by_course).get(source_bucket_key, 0) > 0
+    ]
+    if not source_groups:
+        return None
+    if any(group in protected_groups for group in source_groups):
+        return None
+    source_groups.sort(
+        key=lambda group: (
+            bundle_priority(allocations[group]),
+            -allocations[group].preference_order,
+            bundle_created_at(allocations[group]),
+        )
+    )
+
+    affected_bucket_keys = {source_bucket_key}
+    before_penalty = 0.0
+    after_penalty = 0.0
+    adjusted_demand = dict(bucket_demand)
+    for group in source_groups:
+        current = allocations[group]
+        before_penalty += demand_choice_penalty(current)
+        current_demand = bundle_bucket_demand(current, bucket_by_course)
+        affected_bucket_keys.update(current_demand)
+        for bucket_key, amount in current_demand.items():
+            adjusted_demand[bucket_key] = adjusted_demand.get(bucket_key, 0) - amount
+
+    moves: list[tuple[tuple[str, str], DemandChoiceBundle]] = []
+    for group in source_groups:
+        best_alternative: DemandChoiceBundle | None = None
+        best_incremental_cost: float | None = None
+        for alternative in ordered_choices.get(group, ()):
+            alternative_demand = bundle_bucket_demand(alternative, bucket_by_course)
+            if alternative_demand.get(source_bucket_key, 0) > 0:
+                continue
+            affected = set(alternative_demand)
+            before = sum(
+                demand_bucket_cost(adjusted_demand.get(bucket_key, 0), buckets[bucket_key])
+                for bucket_key in affected
+                if bucket_key in buckets
+            )
+            after = sum(
+                demand_bucket_cost(
+                    adjusted_demand.get(bucket_key, 0) + alternative_demand.get(bucket_key, 0),
+                    buckets[bucket_key],
+                )
+                for bucket_key in affected
+                if bucket_key in buckets
+            )
+            incremental_cost = after - before + demand_choice_penalty(alternative)
+            if best_incremental_cost is None or incremental_cost < best_incremental_cost:
+                best_incremental_cost = incremental_cost
+                best_alternative = alternative
+        if best_alternative is None:
+            return None
+        moves.append((group, best_alternative))
+        after_penalty += demand_choice_penalty(best_alternative)
+        best_demand = bundle_bucket_demand(best_alternative, bucket_by_course)
+        affected_bucket_keys.update(best_demand)
+        for bucket_key, amount in best_demand.items():
+            adjusted_demand[bucket_key] = adjusted_demand.get(bucket_key, 0) + amount
+
+    before_cost = sum(
+        demand_bucket_cost(bucket_demand.get(bucket_key, 0), buckets[bucket_key])
+        for bucket_key in affected_bucket_keys
+        if bucket_key in buckets
+    ) + before_penalty
+    after_cost = sum(
+        demand_bucket_cost(adjusted_demand.get(bucket_key, 0), buckets[bucket_key])
+        for bucket_key in affected_bucket_keys
+        if bucket_key in buckets
+    ) + after_penalty
+    delta = after_cost - before_cost
+    if delta >= 0:
+        return None
+    return {"moves": moves, "delta": delta}
+
+
 def best_batch_move_from_problem_bucket(
     source_bucket_key: tuple[Any, ...],
     ordered_choices: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]],
@@ -833,7 +1083,10 @@ def best_batch_move_from_problem_bucket(
     bucket_by_course: dict[str, tuple[Any, ...]],
     buckets: dict[tuple[Any, ...], DemandPlanningBucket],
     bucket_demand: dict[tuple[Any, ...], int],
+    *,
+    protected_groups: set[tuple[str, str]] | None = None,
 ) -> list[tuple[tuple[str, str], DemandChoiceBundle]]:
+    protected_groups = protected_groups or set()
     source_bucket = buckets.get(source_bucket_key)
     if not source_bucket:
         return []
@@ -857,6 +1110,8 @@ def best_batch_move_from_problem_bucket(
         list[tuple[tuple[str, str], DemandChoiceBundle]],
     ] = {}
     for group, current_choice in allocations.items():
+        if group in protected_groups:
+            continue
         current_demand = bundle_bucket_demand(current_choice, bucket_by_course)
         if current_demand.get(source_bucket_key, 0) <= 0:
             continue
@@ -923,8 +1178,11 @@ def suppress_unviable_small_remainders(
     allocations: dict[tuple[str, str], DemandChoiceBundle],
     bucket_by_course: dict[str, tuple[Any, ...]],
     buckets: dict[tuple[Any, ...], DemandPlanningBucket],
+    *,
+    protected_groups: set[tuple[str, str]] | None = None,
 ) -> tuple[dict[tuple[str, str], DemandChoiceBundle], dict[tuple[str, str], DemandChoiceBundle]]:
     selected = dict(allocations)
+    protected_groups = protected_groups or set()
     unplanned: dict[tuple[str, str], DemandChoiceBundle] = {}
     bucket_demand = bucket_demand_from_course_demand(
         demand_from_bundle_allocations(selected.values()),
@@ -944,6 +1202,7 @@ def suppress_unviable_small_remainders(
         candidates = [
             group
             for group, bundle in selected.items()
+            if group not in protected_groups
             if bundle_bucket_demand(bundle, bucket_by_course).get(bucket_key, 0) > 0
         ]
         candidates.sort(
@@ -964,6 +1223,50 @@ def suppress_unviable_small_remainders(
             if removed_from_bucket >= unserved:
                 break
     return selected, unplanned
+
+
+def restore_minimum_student_coverage(
+    selected: dict[tuple[str, str], DemandChoiceBundle],
+    unplanned: dict[tuple[str, str], DemandChoiceBundle],
+) -> tuple[
+    dict[tuple[str, str], DemandChoiceBundle],
+    dict[tuple[str, str], DemandChoiceBundle],
+    list[dict[str, Any]],
+]:
+    selected_by_student = {student_id for student_id, _group_id in selected}
+    unplanned_by_student: dict[str, list[tuple[tuple[str, str], DemandChoiceBundle]]] = {}
+    for group, bundle in unplanned.items():
+        student_id, _group_id = group
+        if student_id in selected_by_student:
+            continue
+        unplanned_by_student.setdefault(student_id, []).append((group, bundle))
+
+    restored_selected = dict(selected)
+    restored_unplanned = dict(unplanned)
+    events: list[dict[str, Any]] = []
+    for student_id, candidates in sorted(unplanned_by_student.items()):
+        candidates.sort(
+            key=lambda item: (
+                item[1].preference_order,
+                -bundle_priority(item[1]),
+                bundle_created_at(item[1]),
+            )
+        )
+        group, bundle = candidates[0]
+        restored_selected[group] = bundle
+        restored_unplanned.pop(group, None)
+        selected_by_student.add(student_id)
+        events.append(
+            {
+                "student_id": student_id,
+                "group": group,
+                "request_ids": list(bundle.request_ids),
+                "preference_order": bundle.preference_order,
+                "course_ids": [choice.demand_course.id for choice in bundle.choices],
+                "reason": "Turma abaixo do minimo aceita para evitar aluno sem nenhuma oferta planejada.",
+            }
+        )
+    return restored_selected, restored_unplanned, events
 
 
 def bundle_bucket_demand(
@@ -1055,7 +1358,7 @@ def demand_bucket_cost(demand: int, bucket: DemandPlanningBucket) -> float:
     large_room_penalty = 0.0
     if "large" in strategy:
         large_room_penalty = max(0, bucket.large_capacity - max(sizes)) * 0.06
-    section_count_penalty = len(sizes) * 34.0
+    section_count_penalty = len(sizes) * DEMAND_SECTION_COST
     residual_penalty = unserved * 1_200.0
     balance_penalty = statistics.pstdev(sizes) if len(sizes) > 1 else 0.0
     small_excess_penalty = demand_small_excess_penalty(
@@ -1211,7 +1514,7 @@ def prune_courses_for_teaching_capacity(
         if required_hours <= capacity_hours:
             continue
         removable = sorted(
-            professor_courses,
+            [course for course in professor_courses if not course_requires_regular_scheduling(course)],
             key=lambda course: (
                 course.section_index == 0,
                 course.criticality,
@@ -1220,6 +1523,8 @@ def prune_courses_for_teaching_capacity(
                 course.name,
             ),
         )
+        if not removable:
+            continue
         for course in removable:
             if required_hours <= capacity_hours:
                 break
@@ -1496,14 +1801,24 @@ def build_course_snapshot(
     requested_demand_by_course: dict[str, int] | None = None,
     rooms: list[RoomData] | None = None,
     requested_time_windows_by_course: dict[str, tuple[TimeDemandData, ...]] | None = None,
+    regular_demand_by_course: dict[str, int] | None = None,
     *,
     demand_driven: bool = False,
 ) -> tuple[list[CourseData], dict[str, tuple[str, ...]]]:
     requested_demand_by_course = requested_demand_by_course or {}
     requested_time_windows_by_course = requested_time_windows_by_course or {}
+    regular_demand_by_course = regular_demand_by_course or {}
     grouped: dict[tuple[Any, ...], list[Course]] = {}
     for course in raw_courses:
-        grouped.setdefault(course_group_key(course), []).append(course)
+        grouped.setdefault(
+            course_snapshot_group_key(
+                course,
+                degree_program_by_id,
+                regular_demand_by_course,
+                demand_driven=demand_driven,
+            ),
+            [],
+        ).append(course)
 
     courses: list[CourseData] = []
     source_to_snapshot: dict[str, list[str]] = {}
@@ -1514,6 +1829,7 @@ def build_course_snapshot(
             degree_program_by_id,
             requested_demand_by_course,
             requested_time_windows_by_course,
+            regular_demand_by_course,
             demand_driven=demand_driven,
         )
         expanded_courses = expand_course_sections(course_data, rooms or [], demand_driven=demand_driven)
@@ -1557,12 +1873,47 @@ def course_group_key(course: Course) -> tuple[Any, ...]:
     return ("course", course.id)
 
 
+def course_snapshot_group_key(
+    course: Course,
+    degree_program_by_id: dict[str, DegreeProgram],
+    regular_demand_by_course: dict[str, int],
+    *,
+    demand_driven: bool,
+) -> tuple[Any, ...]:
+    key = course_group_key(course)
+    if (
+        demand_driven
+        and regular_demand_by_course.get(course.id, 0) > 0
+        and is_regular_curriculum_course(course)
+        and (window := course_regular_window(course, degree_program_by_id))
+    ):
+        return (*key, "regular-window", *window)
+    return key
+
+
+def course_regular_window(
+    course: Course,
+    degree_program_by_id: dict[str, DegreeProgram],
+) -> tuple[int, int] | None:
+    if not course.degree_program_id:
+        return None
+    degree_program = degree_program_by_id.get(course.degree_program_id)
+    if not degree_program:
+        return None
+    start = degree_program.schedule_start_minute
+    end = degree_program.schedule_end_minute
+    if start is None or end is None:
+        return None
+    return start, end
+
+
 def merge_course_group(
     group: list[Course],
     campus_by_id: dict[str, Campus],
     degree_program_by_id: dict[str, DegreeProgram],
     requested_demand_by_course: dict[str, int],
     requested_time_windows_by_course: dict[str, tuple[TimeDemandData, ...]],
+    regular_demand_by_course: dict[str, int],
     *,
     demand_driven: bool,
 ) -> CourseData:
@@ -1627,7 +1978,12 @@ def merge_course_group(
         degree_program_id=common_value([course.degree_program_id for course in group]),
         campus_names=campus_names,
         degree_program_names=degree_program_names,
-        regular_time_windows=regular_time_windows_for_group(group, degree_program_by_id),
+        regular_time_windows=regular_time_windows_for_group(
+            group,
+            degree_program_by_id,
+            regular_demand_by_course=regular_demand_by_course,
+            demand_driven=demand_driven,
+        ),
         official_schedule=official_schedule_for_group(group, demand_driven=demand_driven),
         requested_time_windows=merge_requested_time_windows(
             group,
@@ -1645,8 +2001,6 @@ def expand_course_sections(
 ) -> list[CourseData]:
     if not demand_driven:
         return [course]
-    if course.expected_demand < PLANNING_MIN_SECTION_DEMAND:
-        return []
 
     section_sizes, unserved, strategy = planned_section_sizes(course, rooms)
     section_count = len(section_sizes)
@@ -1667,6 +2021,8 @@ def expand_course_sections(
 
 
 def planned_section_sizes(course: CourseData, rooms: list[RoomData]) -> tuple[list[int], int, str]:
+    if course.expected_demand < PLANNING_MIN_SECTION_DEMAND:
+        return [course.expected_demand], 0, "forced_minimum_coverage_section"
     compatible_capacities = sorted(
         room.capacity
         for room in rooms
@@ -1767,22 +2123,21 @@ def common_value(values: list[str | None]) -> str | None:
 
 
 def regular_time_windows_for_group(
-    group: list[Course], degree_program_by_id: dict[str, DegreeProgram]
+    group: list[Course],
+    degree_program_by_id: dict[str, DegreeProgram],
+    *,
+    regular_demand_by_course: dict[str, int] | None = None,
+    demand_driven: bool = False,
 ) -> tuple[tuple[int, int], ...]:
+    regular_demand_by_course = regular_demand_by_course or {}
     windows: set[tuple[int, int]] = set()
     for course in group:
+        if demand_driven and regular_demand_by_course.get(course.id, 0) <= 0:
+            continue
         if not is_regular_curriculum_course(course):
             continue
-        if not course.degree_program_id:
-            continue
-        degree_program = degree_program_by_id.get(course.degree_program_id)
-        if not degree_program:
-            continue
-        start = degree_program.schedule_start_minute
-        end = degree_program.schedule_end_minute
-        if start is None or end is None:
-            continue
-        windows.add((start, end))
+        if window := course_regular_window(course, degree_program_by_id):
+            windows.add(window)
     return tuple(sorted(windows))
 
 
@@ -2316,6 +2671,19 @@ def build_official_schedule_solution(snapshot: Snapshot) -> CandidateSolution:
                 ),
                 None,
             )
+            forced_regular_availability = False
+            if not professor and course_requires_regular_scheduling(course):
+                professor = next(
+                    (
+                        candidate
+                        for candidate in professors
+                        if (candidate.id, slot.id) not in professor_slot
+                        and professor_load[candidate.id] + slot.hours
+                        <= snapshot.contracts.get(candidate.id, ContractData(0, 20)).max_hours
+                    ),
+                    None,
+                )
+                forced_regular_availability = professor is not None
             if not professor:
                 hard_failures.append(
                     {
@@ -2364,8 +2732,20 @@ def build_official_schedule_solution(snapshot: Snapshot) -> CandidateSolution:
                     time_slot_id=slot.id,
                     session_index=session_index,
                     hard_violations=[],
-                    soft_violations=[],
-                    origin="ufpel_official",
+                    soft_violations=[
+                        {
+                            "code": "forced_regular_teacher_availability",
+                            "message": (
+                                "Disponibilidade docente criada pelo planejador para garantir "
+                                "oferta regular no turno oficial."
+                            ),
+                        }
+                    ]
+                    if forced_regular_availability
+                    else [],
+                    origin="ufpel_official_forced_availability"
+                    if forced_regular_availability
+                    else "ufpel_official",
                 )
             )
 
@@ -2390,28 +2770,94 @@ def enumerate_candidates(
     section_professors: dict[tuple[Any, ...], set[str]],
     rng: random.Random,
 ) -> list[tuple[float, str, str, str, list[dict[str, Any]]]]:
+    room_limit = candidate_room_limit(snapshot)
+    candidates = enumerate_candidates_once(
+        snapshot,
+        course,
+        professor_load,
+        professor_slot,
+        room_slot,
+        course_slot,
+        section_professors,
+        rng,
+        force_teacher_availability=False,
+        room_limit=room_limit,
+    )
+    if not candidates and room_limit is not None:
+        candidates = enumerate_candidates_once(
+            snapshot,
+            course,
+            professor_load,
+            professor_slot,
+            room_slot,
+            course_slot,
+            section_professors,
+            rng,
+            force_teacher_availability=False,
+            room_limit=None,
+        )
+    if candidates or not course_requires_regular_scheduling(course):
+        return candidates
+    return enumerate_candidates_once(
+        snapshot,
+        course,
+        professor_load,
+        professor_slot,
+        room_slot,
+        course_slot,
+        section_professors,
+        rng,
+        force_teacher_availability=True,
+        room_limit=None,
+    )
+
+
+def enumerate_candidates_once(
+    snapshot: Snapshot,
+    course: CourseData,
+    professor_load: dict[str, float],
+    professor_slot: set[tuple[str, str]],
+    room_slot: set[tuple[str, str]],
+    course_slot: set[tuple[str, str]],
+    section_professors: dict[tuple[Any, ...], set[str]],
+    rng: random.Random,
+    *,
+    force_teacher_availability: bool,
+    room_limit: int | None,
+) -> list[tuple[float, str, str, str, list[dict[str, Any]]]]:
     candidates: list[tuple[float, str, str, str, list[dict[str, Any]]]] = []
-    for professor in snapshot.professors:
-        if course.id not in snapshot.qualifications.get(professor.id, set()):
-            continue
+    qualified_professors = [
+        professor
+        for professor in snapshot.professors
+        if course.id in snapshot.qualifications.get(professor.id, set())
+    ]
+    candidate_slots = [
+        slot for slot in snapshot.slots if slot_matches_course_regular_window(course, slot)
+    ]
+    compatible_rooms = sorted(
+        (
+            room
+            for room in snapshot.rooms
+            if room_matches_course_campus(course, room)
+            and room.capacity >= course.expected_demand
+            and (not course.requires_lab or room.kind == RoomKind.lab.value)
+        ),
+        key=lambda room: (room.capacity - course.expected_demand, room.capacity, room.name),
+    )
+    if room_limit is not None:
+        compatible_rooms = compatible_rooms[:room_limit]
+    for professor in qualified_professors:
         contract = snapshot.contracts.get(professor.id, ContractData(min_hours=0, max_hours=12))
-        for slot in snapshot.slots:
-            if not slot_matches_course_regular_window(course, slot):
-                continue
+        for slot in candidate_slots:
             if (professor.id, slot.id) in professor_slot or (course.id, slot.id) in course_slot:
                 continue
             if professor_load[professor.id] + slot.hours > contract.max_hours:
                 continue
-            if not professor_can_teach(snapshot.availability.get(professor.id, []), slot):
+            teacher_available = professor_can_teach(snapshot.availability.get(professor.id, []), slot)
+            if not teacher_available and not force_teacher_availability:
                 continue
-            for room in snapshot.rooms:
+            for room in compatible_rooms:
                 if (room.id, slot.id) in room_slot:
-                    continue
-                if not room_matches_course_campus(course, room):
-                    continue
-                if room.capacity < course.expected_demand:
-                    continue
-                if course.requires_lab and room.kind != RoomKind.lab.value:
                     continue
 
                 soft: list[dict[str, Any]] = []
@@ -2432,17 +2878,30 @@ def enumerate_candidates(
                     section_professors,
                 )
                 day_penalty = same_day_fragmentation_penalty(snapshot, course, slot)
+                forced_availability_penalty = 80.0 if not teacher_available else 0.0
                 score = (
                     room_slack * 0.08
                     + load_penalty
                     + section_diversity_penalty
                     + day_penalty
                     + time_preference_penalty
+                    + forced_availability_penalty
                     - preference_value * 4
                     - availability_bonus * 2
                     + rng.random() * 3
                 )
                 soft.extend(time_preference_soft)
+                if not teacher_available:
+                    soft.append(
+                        {
+                            "code": "forced_regular_teacher_availability",
+                            "weight": 1,
+                            "message": (
+                                "Disponibilidade docente criada pelo planejador para garantir "
+                                "oferta regular no turno oficial."
+                            ),
+                        }
+                    )
                 if preference_value < 0:
                     soft.append(
                         {
@@ -2596,6 +3055,16 @@ def slot_matches_course_regular_window(course: CourseData, slot: SlotData) -> bo
     if not course.regular_time_windows:
         return True
     return all(start <= slot.start_minute and end >= slot.end_minute for start, end in course.regular_time_windows)
+
+
+def course_requires_regular_scheduling(course: CourseData) -> bool:
+    return course.kind == CourseKind.mandatory.value and bool(course.regular_time_windows)
+
+
+def candidate_room_limit(snapshot: Snapshot) -> int | None:
+    if len(snapshot.courses) < 180:
+        return None
+    return 36
 
 
 def room_matches_course_campus(course: CourseData, room: RoomData) -> bool:

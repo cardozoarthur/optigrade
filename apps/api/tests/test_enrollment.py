@@ -792,3 +792,300 @@ def test_enrollment_allocates_whole_complex_branch_and_checks_requested_time(
     assert summary["solver_planned_allocations"] == 3
     assert enrolled_course_ids == {algebra.id, geometry.id, physics.id}
     assert superseded_course_ids == {calculus.id}
+
+
+def test_enrollment_only_blocks_requested_time_when_preference_is_hard(db_session) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    soft_course = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    hard_course = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    soft_student = Student(name="Aluno soft", degree_program_id=program.id, current_semester=1)
+    hard_student = Student(name="Aluno hard", degree_program_id=program.id, current_semester=1)
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=10, kind=RoomKind.lecture)
+    scheduled = TimeSlot(day=1, start_minute=8 * 60, end_minute=10 * 60, label="Ter 08-10")
+    run = OptimizationRun(metrics={"planned_sections": []})
+    db_session.add_all([soft_course, hard_course, soft_student, hard_student, professor, room, scheduled, run])
+    db_session.flush()
+    db_session.add_all(
+        [
+            Assignment(
+                run_id=run.id,
+                course_id=soft_course.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=scheduled.id,
+            ),
+            Assignment(
+                run_id=run.id,
+                course_id=hard_course.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=scheduled.id,
+            ),
+            StudentCourseRequest(
+                student_id=soft_student.id,
+                course_id=soft_course.id,
+                target_semester="2026/2",
+                desired_day=0,
+                desired_start_minute=8 * 60,
+                desired_end_minute=10 * 60,
+                time_preference_strength=ConstraintStrength.soft,
+            ),
+            StudentCourseRequest(
+                student_id=hard_student.id,
+                course_id=hard_course.id,
+                target_semester="2026/2",
+                desired_day=0,
+                desired_start_minute=8 * 60,
+                desired_end_minute=10 * 60,
+                time_preference_strength=ConstraintStrength.hard,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    summary = run_enrollment_round(db_session, "2026/2", run_id=run.id)
+    enrollments = {
+        enrollment.student_id: enrollment
+        for enrollment in db_session.query(StudentEnrollment).all()
+    }
+
+    assert summary["enrolled"] == 1
+    assert summary["waitlisted"] == 1
+    assert enrollments[soft_student.id].status == "enrolled"
+    assert enrollments[hard_student.id].status == "waitlisted"
+
+
+def test_enrollment_rescues_student_with_at_least_one_available_course(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    course_with_seat = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    course_without_section = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    student = Student(name="Aluno sem ramo completo", degree_program_id=program.id, current_semester=2)
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=10, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    run = OptimizationRun(
+        metrics={
+            "planned_sections": [
+                {
+                    "db_course_id": "pending",
+                    "section_index": 0,
+                    "planned_students": 1,
+                }
+            ]
+        }
+    )
+    db_session.add_all(
+        [
+            program,
+            course_with_seat,
+            course_without_section,
+            student,
+            professor,
+            room,
+            slot,
+            run,
+        ]
+    )
+    db_session.flush()
+    run.metrics = {
+        "planned_sections": [
+            {
+                "db_course_id": course_with_seat.id,
+                "section_index": 0,
+                "planned_students": 1,
+            }
+        ]
+    }
+    db_session.add(
+        Assignment(
+            run_id=run.id,
+            course_id=course_with_seat.id,
+            professor_id=professor.id,
+            room_id=room.id,
+            time_slot_id=slot.id,
+            session_index=0,
+        )
+    )
+    db_session.add_all(
+        [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=course_with_seat.id,
+                target_semester="2026/2",
+                alternative_group="ramo-incompleto",
+                preference_order=1,
+                priority=5,
+            ),
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=course_without_section.id,
+                target_semester="2026/2",
+                alternative_group="ramo-incompleto",
+                preference_order=1,
+                priority=5,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    summary = run_enrollment_round(db_session, "2026/2", run_id=run.id)
+    enrollments = {
+        enrollment.course_id: enrollment
+        for enrollment in db_session.query(StudentEnrollment).all()
+    }
+
+    assert summary["enrolled"] == 1
+    assert summary["rescue_enrolled"] == 1
+    assert summary["students_without_enrollment_before_rescue"] == 1
+    assert summary["students_without_enrollment_after_rescue"] == 0
+    assert enrollments[course_with_seat.id].status == "enrolled"
+    assert enrollments[course_with_seat.id].reason == (
+        "Alocado em turma de resgate para evitar semestre sem matricula"
+    )
+    assert enrollments[course_without_section.id].status == "waitlisted"
+
+
+def test_enrollment_rescue_rebalances_seat_from_student_with_other_class(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    shared_course = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    backup_course = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    already_served = Student(
+        name="Aluno ja atendido",
+        degree_program_id=program.id,
+        current_semester=4,
+    )
+    empty_student = Student(
+        name="Aluno sem turma",
+        degree_program_id=program.id,
+        current_semester=1,
+    )
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=1, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    run = OptimizationRun(
+        metrics={
+            "planned_sections": [
+                {"db_course_id": "pending-shared", "section_index": 0, "planned_students": 1},
+                {"db_course_id": "pending-backup", "section_index": 0, "planned_students": 1},
+            ]
+        }
+    )
+    db_session.add_all(
+        [shared_course, backup_course, already_served, empty_student, professor, room, slot, run]
+    )
+    db_session.flush()
+    run.metrics = {
+        "planned_sections": [
+            {"db_course_id": shared_course.id, "section_index": 0, "planned_students": 1},
+            {"db_course_id": backup_course.id, "section_index": 0, "planned_students": 1},
+        ]
+    }
+    db_session.add_all(
+        [
+            Assignment(
+                run_id=run.id,
+                course_id=shared_course.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=slot.id,
+            ),
+            Assignment(
+                run_id=run.id,
+                course_id=backup_course.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=slot.id,
+            ),
+            StudentCourseRequest(
+                student_id=already_served.id,
+                course_id=shared_course.id,
+                target_semester="2026/2",
+                priority=5,
+            ),
+            StudentCourseRequest(
+                student_id=already_served.id,
+                course_id=backup_course.id,
+                target_semester="2026/2",
+                priority=5,
+            ),
+            StudentCourseRequest(
+                student_id=empty_student.id,
+                course_id=shared_course.id,
+                target_semester="2026/2",
+                priority=1,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    summary = run_enrollment_round(db_session, "2026/2", run_id=run.id)
+    enrollments = {
+        (enrollment.student_id, enrollment.course_id): enrollment
+        for enrollment in db_session.query(StudentEnrollment).all()
+    }
+
+    assert summary["students_without_enrollment_before_rescue"] == 1
+    assert summary["students_without_enrollment_after_rescue"] == 0
+    assert len(summary["rescue_displaced_allocations"]) == 1
+    assert enrollments[(empty_student.id, shared_course.id)].status == "enrolled"
+    assert enrollments[(already_served.id, shared_course.id)].status == "waitlisted"
+    assert enrollments[(already_served.id, backup_course.id)].status == "enrolled"

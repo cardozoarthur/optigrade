@@ -57,6 +57,7 @@ class StudentDemandChoiceSummary:
     bundles_by_group: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]]
     first_choice_demand_by_course: dict[str, int]
     all_eligible_demand_by_course: dict[str, int]
+    regular_eligible_demand_by_course: dict[str, int]
     total_requests: int
     eligible_requests: int
     blocked_requests: int
@@ -92,8 +93,21 @@ def student_demand_choice_summary(db: Session, semester: str) -> StudentDemandCh
         .filter(StudentCourseRequest.target_semester == semester)
         .all()
     )
+    regular_eligible_demand = regular_eligible_demand_by_course(db)
     if not requests:
-        return StudentDemandChoiceSummary({}, {}, {}, {}, 0, 0, 0, 0, 0, 0)
+        return StudentDemandChoiceSummary(
+            {},
+            {},
+            {},
+            {},
+            regular_eligible_demand,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
 
     student_ids = {item.student_id for item in requests}
     course_ids = {item.course_id for item in requests}
@@ -236,6 +250,7 @@ def student_demand_choice_summary(db: Session, semester: str) -> StudentDemandCh
         bundles_by_group=bundles_by_group,
         first_choice_demand_by_course=first_choice_demand,
         all_eligible_demand_by_course=all_eligible_demand,
+        regular_eligible_demand_by_course=regular_eligible_demand,
         total_requests=len(requests),
         eligible_requests=eligible,
         blocked_requests=blocked,
@@ -243,6 +258,66 @@ def student_demand_choice_summary(db: Session, semester: str) -> StudentDemandCh
         reoffer_requests=reoffer,
         elective_requests=elective,
     )
+
+
+def regular_eligible_demand_by_course(db: Session) -> dict[str, int]:
+    students = db.query(Student).all()
+    if not students:
+        return {}
+
+    all_courses = {item.id: item for item in db.query(Course).all()}
+    regular_courses = [
+        course
+        for course in all_courses.values()
+        if course.kind == CourseKind.mandatory and course.degree_program_id
+    ]
+    if not regular_courses:
+        return {}
+
+    courses_by_program_semester: dict[tuple[str, int], list[Course]] = {}
+    for course in regular_courses:
+        courses_by_program_semester.setdefault(
+            (course.degree_program_id, course.recommended_semester),
+            [],
+        ).append(course)
+
+    student_ids = [student.id for student in students]
+    histories = (
+        db.query(StudentCourseHistory)
+        .filter(StudentCourseHistory.student_id.in_(student_ids))
+        .all()
+    )
+    completed_by_student: dict[str, dict[str, StudentCourseHistory]] = {}
+    completed_contexts_by_student: dict[str, dict[str, StudentCourseHistory]] = {}
+    for history in histories:
+        if history.status != StudentCourseStatus.completed:
+            continue
+        completed_by_student.setdefault(history.student_id, {})[history.course_id] = history
+        course = all_courses.get(history.course_id)
+        context_key = normalize_context_key(course.context_key) if course else None
+        if course and course.shareable and context_key:
+            completed_contexts_by_student.setdefault(history.student_id, {})[context_key] = history
+
+    restrictions_by_course = restrictions_for_courses(db, [course.id for course in regular_courses])
+    demand: dict[str, int] = {}
+    for student in students:
+        eligible_regular_courses = courses_by_program_semester.get(
+            (student.degree_program_id, student.current_semester),
+            [],
+        )
+        completed = completed_by_student.get(student.id, {})
+        completed_contexts = completed_contexts_by_student.get(student.id, {})
+        for course in eligible_regular_courses:
+            if not course_eligible_for_student_cached(
+                course,
+                completed,
+                completed_contexts,
+                restrictions_by_course,
+                all_courses,
+            ):
+                continue
+            demand[course.id] = demand.get(course.id, 0) + 1
+    return demand
 
 
 def demand_from_allocations(choices: Iterable[DemandChoice]) -> dict[str, int]:
