@@ -307,6 +307,80 @@ def test_failed_shareable_course_can_be_reoffered_by_equivalent_program(db_sessi
     assert summary.demand_by_course == {civil_calculus.id: 1}
 
 
+def test_failed_shareable_course_with_class_suffix_can_be_reoffered_by_equivalent_program(
+    db_session,
+) -> None:
+    campus = Campus(name="Campus Porto")
+    production = DegreeProgram(name="Engenharia de Producao", code="EP", campus_id=campus.id)
+    civil = DegreeProgram(name="Engenharia Civil", code="EC", campus_id=campus.id)
+    db_session.add(campus)
+    db_session.flush()
+    production.campus_id = campus.id
+    civil.campus_id = campus.id
+    db_session.add_all([production, civil])
+    db_session.flush()
+    production_chemistry = Course(
+        name="QUÍMICA GERAL (T1)",
+        campus_id=campus.id,
+        degree_program_id=production.id,
+        workload_hours=4,
+        theoretical_hours=4,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=40,
+        context_key="ufpel:15001001:t1",
+        shareable=True,
+    )
+    civil_chemistry = Course(
+        name="QUÍMICA GERAL (T2)",
+        campus_id=campus.id,
+        degree_program_id=civil.id,
+        workload_hours=4,
+        theoretical_hours=4,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=45,
+        context_key="ufpel:15001001:t2",
+        shareable=True,
+    )
+    student = Student(name="Aluno", degree_program_id=production.id, current_semester=2)
+    db_session.add_all([production_chemistry, civil_chemistry, student])
+    db_session.flush()
+    db_session.add(
+        StudentCourseHistory(
+            student_id=student.id,
+            course_id=production_chemistry.id,
+            status=StudentCourseStatus.failed,
+            semester="2026/1",
+            grade=4.5,
+        )
+    )
+    db_session.commit()
+
+    suggestions = build_student_suggestions(db_session, student, "2026/2")
+    civil_suggestion = next(item for item in suggestions if item["course"].id == civil_chemistry.id)
+
+    assert civil_suggestion["eligible"] is True
+    assert civil_suggestion["regular_relation"] == "reoffer"
+    assert "Reoferta equivalente disponivel em outro curso" in civil_suggestion["reasons"]
+
+    db_session.add(
+        StudentCourseRequest(
+            student_id=student.id,
+            course_id=civil_chemistry.id,
+            target_semester="2026/2",
+            priority=5,
+        )
+    )
+    db_session.commit()
+
+    summary = student_demand_summary(db_session, "2026/2")
+
+    assert summary.eligible_requests == 1
+    assert summary.reoffer_requests == 1
+    assert summary.demand_by_course == {civil_chemistry.id: 1}
+
+
 def test_student_requests_increase_snapshot_demand(db_session) -> None:
     campus = Campus(name="Campus")
     program = DegreeProgram(name="Computacao", code="CC")

@@ -8,8 +8,6 @@ from app.models.entities import Course
 TRAILING_PARENTHETICAL_RE = re.compile(r"\s*\([^()]*\)\s*$")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 CLASS_SUFFIX_RE = re.compile(r"^[a-z]{1,3}\d+[a-z]?$")
-SUFFIX_EQUIVALENT_NAME_KEYS = {"trabalho-de-conclusao-de-curso"}
-
 
 def normalize_context_key(context_key: str | None) -> str | None:
     normalized = (context_key or "").strip().lower()
@@ -28,10 +26,7 @@ def canonical_context_key(context_key: str | None) -> str | None:
 
 def academic_context_key(course: Course) -> str | None:
     context_key = normalize_context_key(course.context_key)
-    name_key = normalized_course_name_key(course.name)
-    if name_key in SUFFIX_EQUIVALENT_NAME_KEYS:
-        return canonical_context_key(context_key)
-    return context_key
+    return canonical_context_key(context_key)
 
 
 def course_base_name(name: str) -> str:
@@ -59,16 +54,29 @@ def normalized_course_name_key(name: str | None) -> str | None:
 def academic_group_identity(course: Course, theoretical_hours: int | None = None) -> tuple[str, ...] | None:
     context_key = academic_context_key(course)
     name_key = normalized_course_name_key(course.name)
-    identity_key = context_key or name_key
+    identity_key = academic_identity_key(context_key, name_key)
     if not course.shareable or not identity_key:
         return None
+    campus_key = course.campus_id or "any-campus"
+    if not course.requires_lab:
+        campus_key = "compatible-theoretical-campus"
     return (
         "academic",
         identity_key,
-        course.campus_id or "any-campus",
+        campus_key,
         str(course.workload_hours),
-        str(theoretical_hours if theoretical_hours is not None else course.theoretical_hours or 0),
+        str(theoretical_hours if theoretical_hours is not None else effective_theoretical_hours(course)),
         str(course.practical_hours or 0),
         str(course.requires_lab),
         course.kind.value,
     )
+
+
+def academic_identity_key(context_key: str | None, name_key: str | None) -> str | None:
+    return context_key or name_key
+
+
+def effective_theoretical_hours(course: Course) -> int:
+    if course.theoretical_hours:
+        return course.theoretical_hours
+    return max(0, course.workload_hours - (course.practical_hours or 0))

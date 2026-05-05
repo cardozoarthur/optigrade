@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import {
   AlertTriangle,
@@ -450,14 +450,20 @@ function ComparisonSlide() {
 }
 
 function ResultSlide() {
+  const searchParams = useSearchParams();
   const { run, assignments, optimizationStartedAt, optimizationError, startOptimization, refreshOptimization } = usePresentation();
   const [elapsed, setElapsed] = useState(0);
   const [catalog, setCatalog] = useState<CalendarCatalog | null>(null);
   const running = !run || run.status === "pending" || run.status === "running";
   const runId = run?.id;
   const runStatus = run?.status;
+  const explicitRunId = searchParams.get("runId");
 
   useEffect(() => {
+    if (explicitRunId && explicitRunId !== runId) {
+      refreshOptimization(explicitRunId).catch(console.error);
+      return;
+    }
     if (!runId || !runStatus) {
       startOptimization().catch(console.error);
       return;
@@ -468,7 +474,7 @@ function ResultSlide() {
 
     const poll = window.setInterval(() => refreshOptimization(runId).catch(console.error), 120000);
     return () => window.clearInterval(poll);
-  }, [refreshOptimization, runId, runStatus, startOptimization]);
+  }, [explicitRunId, refreshOptimization, runId, runStatus, startOptimization]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -516,9 +522,13 @@ function ResultSlide() {
 
   const sectionPlans = plannedSectionsFromMetrics(run.metrics);
   const hardDiagnostics = hardDiagnosticsFromMetrics(run.metrics);
-  const unplannedDemandRequests =
+  const rawUnplannedDemandRequests =
     metricNumber(run.metrics?.student_demand_plan?.unplanned_request_count) ??
     metricNumber(run.metrics?.student_demand_plan?.unplanned_choice_groups);
+  const unplannedAfterEnrollment = run.metrics?.enrollment_round?.unplanned_after_enrollment;
+  const finalUnplannedDemandRequests = metricNumber(unplannedAfterEnrollment?.remaining);
+  const unplannedDemandRequests = finalUnplannedDemandRequests ?? rawUnplannedDemandRequests;
+  const enrolledUnplannedDemandRequests = metricNumber(unplannedAfterEnrollment?.enrolled);
   const sectionsBelowMinimum = sectionPlans.filter(
     (section) => section.planned_students > 0 && section.planned_students < 3
   ).length;
@@ -546,7 +556,11 @@ function ResultSlide() {
         <MetricTile label="Alocados" value={String(run.metrics?.enrollment_round?.enrolled ?? "-")} tone="green" />
         <MetricTile label="Turmas abertas" value={String(sectionPlans.length || "-")} />
         <MetricTile label="Alternativas usadas" value={String(run.metrics?.student_demand_plan?.alternative_assignments ?? "-")} />
-        <MetricTile label="Demandas não planejadas" value={String(unplannedDemandRequests ?? "-")} tone="amber" />
+        <MetricTile
+          label="Demandas pendentes"
+          value={String(unplannedDemandRequests ?? "-")}
+          tone={unplannedDemandRequests ? "amber" : "green"}
+        />
         <MetricTile label="Turmas abaixo do mínimo" value={String(sectionsBelowMinimum)} tone={sectionsBelowMinimum ? "amber" : "green"} />
         <MetricTile label="Sobras sem turma" value={String(unservedSectionDemand)} tone={unservedSectionDemand ? "amber" : "green"} />
       </div>
@@ -554,6 +568,8 @@ function ResultSlide() {
         hardDiagnostics={hardDiagnostics}
         sectionIssues={sectionIssues}
         unplannedDemandRequests={unplannedDemandRequests ?? 0}
+        rawUnplannedDemandRequests={rawUnplannedDemandRequests ?? 0}
+        enrolledUnplannedDemandRequests={enrolledUnplannedDemandRequests ?? 0}
       />
       <CalendarPreview assignments={assignments} catalog={catalog} sectionPlans={sectionPlans} />
     </section>
@@ -775,15 +791,28 @@ type CalendarCatalog = {
 };
 
 type PlannedSection = {
+  course_name?: string;
   db_course_id: string;
   section_index: number;
   section_label: string;
+  source_course_ids?: string[];
+  degree_programs?: string[];
+  campuses?: string[];
+  context_key?: string | null;
+  workload_hours?: number;
+  theoretical_hours?: number;
+  practical_hours?: number;
+  course_turns?: string[];
+  regular_time_windows?: Array<{
+    start_minute: number;
+    end_minute: number;
+    turn?: string;
+  }>;
   planned_students: number;
   planned_capacity_target?: number;
   planned_total_demand?: number;
   planned_unserved_demand?: number;
   strategy?: string;
-  source_course_ids?: string[];
 };
 
 type HardDiagnostic = {
@@ -798,11 +827,15 @@ type HardDiagnostic = {
 function ResultDiagnostics({
   hardDiagnostics,
   sectionIssues,
-  unplannedDemandRequests
+  unplannedDemandRequests,
+  rawUnplannedDemandRequests,
+  enrolledUnplannedDemandRequests
 }: {
   hardDiagnostics: HardDiagnostic[];
   sectionIssues: PlannedSection[];
   unplannedDemandRequests: number;
+  rawUnplannedDemandRequests: number;
+  enrolledUnplannedDemandRequests: number;
 }) {
   const hasProblems = hardDiagnostics.length > 0 || sectionIssues.length > 0 || unplannedDemandRequests > 0;
   if (!hasProblems) {
@@ -815,6 +848,12 @@ function ResultDiagnostics({
             <p className="text-sm text-slate-700">
               A rodada não retornou conflitos hard, sobras de demanda ou turmas abaixo do mínimo planejado.
             </p>
+            {rawUnplannedDemandRequests > 0 && enrolledUnplannedDemandRequests > 0 ? (
+              <p className="mt-1 text-sm text-slate-700">
+                {enrolledUnplannedDemandRequests} pedidos que ficaram fora do plano intermediário foram atendidos
+                na matrícula final.
+              </p>
+            ) : null}
           </div>
         </div>
       </Panel>
@@ -829,9 +868,8 @@ function ResultDiagnostics({
           <div>
             <h2 className="text-lg font-semibold">Pendências para correção da rodada</h2>
             <p className="text-sm text-slate-700">
-              “Demandas não planejadas” são pedidos dos alunos que o planejador deixou fora por baixa demanda,
-              conflito de restrição ou alternativa melhor. “Turmas abaixo do mínimo” só conta turmas abertas com
-              menos de 3 inscritos.
+              “Demandas pendentes” considera apenas pedidos que seguiram sem matrícula depois da etapa final de
+              alocação. “Turmas abaixo do mínimo” só conta turmas abertas com menos de 3 inscritos.
             </p>
           </div>
         </div>
@@ -875,10 +913,10 @@ function ResultDiagnostics({
             <div className="mt-2 grid gap-2 text-xs">
               {unplannedDemandRequests > 0 ? (
                 <div className="rounded-md border border-slateLine px-3 py-2">
-                  <div className="font-semibold text-ink">{unplannedDemandRequests} pedidos ficaram fora do plano</div>
+                  <div className="font-semibold text-ink">{unplannedDemandRequests} pedidos seguem sem atendimento</div>
                   <div className="mt-1 text-slate-600">
-                    Isso não significa turma aberta com 1 ou 2 alunos; significa demanda discente descartada ou redirecionada
-                    antes da abertura final de turmas.
+                    Esses são casos que não foram resolvidos pela combinação entre plano de ofertas, alternativas
+                    informadas e rodada final de matrícula.
                   </div>
                 </div>
               ) : null}
@@ -942,6 +980,8 @@ function CalendarPreview({
             <div key={slot.id} className="min-h-28 rounded-md border border-slateLine bg-slate-50 p-3">
               <div className="text-xs font-semibold uppercase text-slate-500">
                 {dayLabels[slot.day]} · {minutesToLabel(slot.start_minute)}-{minutesToLabel(slot.end_minute)}
+                {" · "}
+                {turnLabel(turnKeyForWindow(slot.start_minute, slot.end_minute))}
               </div>
               <div className="mt-2 grid gap-2">
                 {cellAssignments.length ? (
@@ -952,13 +992,25 @@ function CalendarPreview({
                     const campus = campusById[room?.campus_id ?? ""];
                     const sectionIndex = Math.floor((assignment.session_index ?? 0) / 100);
                     const sectionPlan = sectionByKey[`${assignment.course_id}:${sectionIndex}`];
+                    const courseTitle = sectionPlan?.course_name ?? course?.name ?? assignment.course_id;
+                    const coursePeriod = sectionPlan ? coursePeriodLabel(sectionPlan) : null;
+                    const workload = sectionPlan?.workload_hours ?? course?.workload_hours;
                     return (
                       <div key={assignment.id} className="rounded-md border border-lake/20 bg-white px-3 py-2 text-[11px]">
-                        <div className="font-semibold text-ink">{course?.name ?? assignment.course_id}</div>
+                        <div className="font-semibold text-ink">{courseTitle}</div>
                         <div className="mt-1 font-medium text-lake">
                           {sectionPlan
                             ? `${sectionPlan.section_label} · ${sectionPlan.planned_students} inscritos`
                             : `Turma ${sectionIndex + 1}`}
+                        </div>
+                        <div className="mt-1 text-slate-600">
+                          Turno do curso: {coursePeriod ?? "não informado"}
+                          {workload ? ` · ${workload}h` : ""}
+                        </div>
+                        <div className="text-slate-600">
+                          Oferta: {dayLabels[slot.day]} · {turnLabel(turnKeyForWindow(slot.start_minute, slot.end_minute))}
+                          {" · "}
+                          {minutesToLabel(slot.start_minute)}-{minutesToLabel(slot.end_minute)}
                         </div>
                         <div className="mt-1 text-slate-600">{professor?.name ?? assignment.professor_id}</div>
                         <div className="text-slate-600">
@@ -1024,6 +1076,34 @@ function isHardDiagnostic(value: unknown): value is HardDiagnostic {
 
 function metricNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function coursePeriodLabel(section: PlannedSection) {
+  const directTurns = section.course_turns?.filter(Boolean) ?? [];
+  const windowTurns = section.regular_time_windows?.map((window) => window.turn ?? turnKeyForWindow(window.start_minute, window.end_minute)) ?? [];
+  const labels = Array.from(new Set([...directTurns, ...windowTurns].map(turnLabel))).filter(Boolean);
+  if (!labels.length) return null;
+  return labels.join(" / ");
+}
+
+function turnKeyForWindow(startMinute: number, endMinute: number) {
+  if (startMinute >= 18 * 60) return "noturno";
+  if (endMinute > 19 * 60) return startMinute >= 12 * 60 ? "tarde-noite" : "integral";
+  if (endMinute <= 13 * 60) return "manha";
+  if (startMinute >= 12 * 60) return "tarde";
+  return "manha-tarde";
+}
+
+function turnLabel(value: string) {
+  const labels: Record<string, string> = {
+    manha: "manhã",
+    tarde: "tarde",
+    noturno: "noturno",
+    "manha-tarde": "manhã e tarde",
+    "tarde-noite": "tarde e noite",
+    integral: "integral"
+  };
+  return labels[value] ?? value;
 }
 
 function indexBy<T extends { id: string }>(items: T[]) {

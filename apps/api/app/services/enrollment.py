@@ -23,12 +23,13 @@ from app.models.entities import (
 from app.services.student_planning import (
     completed_contexts_by_course,
     completed_history_by_course,
+    course_completion_key,
     course_eligible_for_student,
     eligibility_course_for_student,
     regular_relation_for_student,
     restrictions_for_courses,
 )
-from app.services.course_identity import academic_group_identity, normalize_context_key
+from app.services.course_identity import academic_context_key, academic_group_identity
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ def run_enrollment_round(
     )
     used_by_bucket = {bucket_id: 0 for bucket_id in capacity_plan.capacity_by_bucket}
     candidates_by_group: dict[tuple[str, str], list[EnrollmentCandidate]] = {}
+    status_by_request_id: dict[str, str] = {}
     blocked = 0
 
     for request in requests:
@@ -104,6 +106,7 @@ def run_enrollment_round(
                 {},
                 "Restricoes academicas nao atendidas",
             )
+            status_by_request_id[request.id] = EnrollmentStatus.blocked.value
             continue
         score, breakdown = score_enrollment_candidate(db, student, course, eligibility_course, request)
         group = (student.id, request.alternative_group or f"course:{course.id}")
@@ -234,8 +237,14 @@ def run_enrollment_round(
                 candidate.breakdown,
                 reason,
             )
+            status_by_request_id[candidate.request.id] = status
 
     db.commit()
+    unplanned_after_enrollment = unplanned_request_status_summary(
+        db,
+        run_id,
+        status_by_request_id,
+    )
     return {
         "target_semester": target_semester,
         "stage": stage,
@@ -251,6 +260,7 @@ def run_enrollment_round(
         "enrolled_by_course": enrolled_by_course,
         "waitlisted_by_course": waitlisted_by_course,
         "solver_planned_allocations": solver_planned_allocations,
+        "unplanned_after_enrollment": unplanned_after_enrollment,
         "rescue_enrolled": len(rescue_allocations),
         "rescue_displaced_allocations": rescue_displacements,
         "students_without_enrollment_before_rescue": students_without_enrollment_before_rescue,
@@ -541,6 +551,70 @@ def planned_request_ids_for_run(db: Session, run_id: str | None) -> set[str]:
     return {request_id for request_id in request_ids if isinstance(request_id, str)}
 
 
+def unplanned_request_status_summary(
+    db: Session,
+    run_id: str | None,
+    status_by_request_id: dict[str, str],
+) -> dict[str, Any]:
+    if not run_id:
+        return {
+            "total": 0,
+            "enrolled": 0,
+            "waitlisted": 0,
+            "blocked": 0,
+            "superseded": 0,
+            "unknown": 0,
+            "remaining": 0,
+            "remaining_request_ids": [],
+        }
+    run = db.get(OptimizationRun, run_id)
+    demand_plan = (run.metrics or {}).get("student_demand_plan") if run else None
+    if not isinstance(demand_plan, dict):
+        return {
+            "total": 0,
+            "enrolled": 0,
+            "waitlisted": 0,
+            "blocked": 0,
+            "superseded": 0,
+            "unknown": 0,
+            "remaining": 0,
+            "remaining_request_ids": [],
+        }
+    raw_request_ids = demand_plan.get("unplanned_request_ids")
+    if not isinstance(raw_request_ids, list):
+        return {
+            "total": 0,
+            "enrolled": 0,
+            "waitlisted": 0,
+            "blocked": 0,
+            "superseded": 0,
+            "unknown": 0,
+            "remaining": 0,
+            "remaining_request_ids": [],
+        }
+    request_ids = [request_id for request_id in raw_request_ids if isinstance(request_id, str)]
+    counts = {
+        "total": len(request_ids),
+        "enrolled": 0,
+        "waitlisted": 0,
+        "blocked": 0,
+        "superseded": 0,
+        "unknown": 0,
+    }
+    remaining_request_ids: list[str] = []
+    for request_id in request_ids:
+        status = status_by_request_id.get(request_id)
+        if status in counts:
+            counts[status] += 1
+        else:
+            counts["unknown"] += 1
+        if status in {EnrollmentStatus.waitlisted.value, EnrollmentStatus.blocked.value} or status is None:
+            remaining_request_ids.append(request_id)
+    counts["remaining"] = len(remaining_request_ids)
+    counts["remaining_request_ids"] = remaining_request_ids
+    return counts
+
+
 def assignment_windows_by_bucket(
     db: Session,
     run_id: str | None,
@@ -668,10 +742,10 @@ def planned_capacity_by_assignment_section(
 
 
 def enrollment_bucket_key(course: Course) -> str:
-    academic_identity = academic_group_identity(course, course.theoretical_hours or 0)
+    academic_identity = academic_group_identity(course)
     if academic_identity:
         return "|".join(academic_identity)
-    context_key = normalize_context_key(course.context_key)
+    context_key = academic_context_key(course)
     if course.shareable and context_key:
         return f"context|{context_key}"
     return f"course:{course.id}"
@@ -719,18 +793,14 @@ def history_for_course_context(
         .all()
     )
     course_by_id = {item.id: item for item in db.query(Course).all()}
-    target_context = normalize_context_key(course.context_key)
+    target_context = course_completion_key(course)
     for history in rows:
         history_course = course_by_id.get(history.course_id)
         if not history_course:
             continue
         if history.course_id == course.id:
             return history
-        if (
-            target_context
-            and history_course.shareable
-            and normalize_context_key(history_course.context_key) == target_context
-        ):
+        if target_context and course_completion_key(history_course) == target_context:
             return history
     return None
 
@@ -752,8 +822,7 @@ def dependency_grade_average(
         if (
             not history
             and required_course
-            and required_course.shareable
-            and (context_key := normalize_context_key(required_course.context_key))
+            and (context_key := course_completion_key(required_course))
         ):
             history = completed_contexts.get(context_key)
         if history and history.grade is not None:

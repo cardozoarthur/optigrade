@@ -244,6 +244,67 @@ def test_enrollment_uses_solver_planned_capacity_instead_of_full_room_capacity(d
     assert summary["waitlisted"] == 8
 
 
+def test_unplanned_request_summary_reflects_final_enrollment_status(db_session) -> None:
+    program = DegreeProgram(name="Engenharia", code="ENG")
+    db_session.add(program)
+    db_session.flush()
+    course = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    professor = Professor(name="Docente")
+    room = Room(name="Sala", capacity=10, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    student = Student(name="Aluno", degree_program_id=program.id, current_semester=2)
+    run = OptimizationRun(metrics={"planned_sections": []})
+    db_session.add_all([course, professor, room, slot, student, run])
+    db_session.flush()
+    request = StudentCourseRequest(
+        student_id=student.id,
+        course_id=course.id,
+        target_semester="2026/2",
+        priority=5,
+    )
+    db_session.add(request)
+    db_session.flush()
+    run.metrics = {
+        "student_demand_plan": {
+            "selected_request_ids": [],
+            "unplanned_request_ids": [request.id],
+        },
+        "planned_sections": [
+            {
+                "db_course_id": course.id,
+                "section_index": 0,
+                "planned_students": 1,
+            }
+        ],
+    }
+    db_session.add(
+        Assignment(
+            run_id=run.id,
+            course_id=course.id,
+            professor_id=professor.id,
+            room_id=room.id,
+            time_slot_id=slot.id,
+            session_index=0,
+        )
+    )
+    db_session.commit()
+
+    summary = run_enrollment_round(db_session, "2026/2", run_id=run.id)
+
+    assert summary["unplanned_after_enrollment"]["total"] == 1
+    assert summary["unplanned_after_enrollment"]["enrolled"] == 1
+    assert summary["unplanned_after_enrollment"]["remaining"] == 0
+    assert summary["unplanned_after_enrollment"]["remaining_request_ids"] == []
+
+
 def test_enrollment_shares_capacity_between_equivalent_course_contexts(db_session) -> None:
     campus = Campus(name="Campus Porto")
     production = DegreeProgram(name="Engenharia de Producao", code="EP")

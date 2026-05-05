@@ -71,6 +71,18 @@ LEGAL_NOTES = (
     "reservas conforme Lei 12.711/2012. Contratos docentes modelados no piloto com "
     "limite operacional de 40h semanais, alinhado aos regimes da Lei 12.772/2012."
 )
+LEGACY_DEMO_PROGRAM_CODES = {"EP", "EC", "CC"}
+LEGACY_DEMO_PROFESSOR_EMAILS = {
+    "ana.ribeiro@ufpel.edu.br",
+    "bruno.lima@ufpel.edu.br",
+    "carla.mendes@ufpel.edu.br",
+    "diego.souza@ufpel.edu.br",
+    "elisa.torres@ufpel.edu.br",
+    "fabio.nunes@ufpel.edu.br",
+    "gustavo.pires@externo.edu.br",
+}
+LEGACY_DEMO_ROOM_NAMES = {"Auditório CC", "Sala 201", "Sala 305", "Lab 1", "Lab 2"}
+LEGACY_DEMO_CAMPUS_NAMES = {"Campus Anglo", "Campus Capao do Leao"}
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,7 @@ def main() -> None:
 
 
 def seed_ufpel_pilot(db: Session, pages: list[CoursePage]) -> None:
+    cleanup_legacy_demo_seed(db)
     campus = upsert_campus(
         db,
         "UFPel - Campus Porto",
@@ -144,6 +157,44 @@ def seed_ufpel_pilot(db: Session, pages: list[CoursePage]) -> None:
             "hard_conflicts": result.metrics.get("hard_conflicts"),
         },
     )
+
+
+def cleanup_legacy_demo_seed(db: Session) -> None:
+    legacy_program_ids = [
+        program.id
+        for program in db.query(DegreeProgram)
+        .filter(
+            DegreeProgram.code.in_(LEGACY_DEMO_PROGRAM_CODES),
+            DegreeProgram.source_url.is_(None),
+        )
+        .all()
+    ]
+    if legacy_program_ids:
+        db.query(Student).filter(Student.degree_program_id.in_(legacy_program_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(Course).filter(Course.degree_program_id.in_(legacy_program_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(DegreeProgram).filter(DegreeProgram.id.in_(legacy_program_ids)).delete(
+            synchronize_session=False
+        )
+
+    db.query(Professor).filter(Professor.email.in_(LEGACY_DEMO_PROFESSOR_EMAILS)).delete(
+        synchronize_session=False
+    )
+    db.query(Room).filter(Room.name.in_(LEGACY_DEMO_ROOM_NAMES)).delete(
+        synchronize_session=False
+    )
+
+    for campus in db.query(Campus).filter(Campus.name.in_(LEGACY_DEMO_CAMPUS_NAMES)).all():
+        has_references = (
+            db.query(DegreeProgram).filter(DegreeProgram.campus_id == campus.id).first()
+            or db.query(Course).filter(Course.campus_id == campus.id).first()
+            or db.query(Room).filter(Room.campus_id == campus.id).first()
+        )
+        if not has_references:
+            db.delete(campus)
 
 
 def fetch_course_page(code: int) -> CoursePage:

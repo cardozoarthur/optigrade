@@ -161,6 +161,16 @@ export type EnrollmentRoundSummary = {
   bucket_by_course?: Record<string, string>;
   enrolled_by_course?: Record<string, number>;
   waitlisted_by_course?: Record<string, number>;
+  unplanned_after_enrollment?: {
+    total: number;
+    enrolled: number;
+    waitlisted: number;
+    blocked: number;
+    superseded: number;
+    unknown: number;
+    remaining: number;
+    remaining_request_ids?: string[];
+  };
 };
 
 export type Professor = {

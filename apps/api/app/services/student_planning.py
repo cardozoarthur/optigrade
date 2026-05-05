@@ -17,6 +17,7 @@ from app.models.entities import (
     StudentCourseRequest,
     StudentCourseStatus,
 )
+from app.services.course_identity import academic_context_key, academic_group_identity
 
 
 @dataclass(frozen=True)
@@ -121,11 +122,11 @@ def student_demand_choice_summary(db: Session, semester: str) -> StudentDemandCh
     }
     all_courses = {item.id: item for item in db.query(Course).all()}
     program_context_courses = {
-        (item.degree_program_id, context_key): item
+        (item.degree_program_id, equivalence_key): item
         for item in all_courses.values()
         if item.degree_program_id
         and item.shareable
-        and (context_key := normalize_context_key(item.context_key))
+        and (equivalence_key := course_equivalence_key(item))
     }
     histories = (
         db.query(StudentCourseHistory)
@@ -139,9 +140,8 @@ def student_demand_choice_summary(db: Session, semester: str) -> StudentDemandCh
             continue
         completed_by_student.setdefault(history.student_id, {})[history.course_id] = history
         course = all_courses.get(history.course_id)
-        context_key = normalize_context_key(course.context_key) if course else None
-        if course and course.shareable and context_key:
-            completed_contexts_by_student.setdefault(history.student_id, {})[context_key] = history
+        if course and (completion_key := course_completion_key(course)):
+            completed_contexts_by_student.setdefault(history.student_id, {})[completion_key] = history
     restrictions_by_course = restrictions_for_courses(db, list(all_courses.keys()))
 
     choices_by_group: dict[tuple[str, str], list[DemandChoice]] = {}
@@ -294,9 +294,8 @@ def regular_eligible_demand_by_course(db: Session) -> dict[str, int]:
             continue
         completed_by_student.setdefault(history.student_id, {})[history.course_id] = history
         course = all_courses.get(history.course_id)
-        context_key = normalize_context_key(course.context_key) if course else None
-        if course and course.shareable and context_key:
-            completed_contexts_by_student.setdefault(history.student_id, {})[context_key] = history
+        if course and (completion_key := course_completion_key(course)):
+            completed_contexts_by_student.setdefault(history.student_id, {})[completion_key] = history
 
     restrictions_by_course = restrictions_for_courses(db, [course.id for course in regular_courses])
     demand: dict[str, int] = {}
@@ -347,13 +346,13 @@ def group_choices_by_preference_order(
 def eligibility_course_for_student_cached(
     student: Student,
     course: Course,
-    program_context_courses: dict[tuple[str | None, str], Course],
+    program_context_courses: dict[tuple[str | None, tuple[str, ...]], Course],
 ) -> Course | None:
     if not course.degree_program_id or course.degree_program_id == student.degree_program_id:
         return course
-    context_key = normalize_context_key(course.context_key)
-    if context_key and course.shareable:
-        return program_context_courses.get((student.degree_program_id, context_key))
+    equivalence_key = course_equivalence_key(course)
+    if equivalence_key:
+        return program_context_courses.get((student.degree_program_id, equivalence_key))
     return None
 
 
@@ -388,8 +387,7 @@ def demand_course_for_student_cached(
         requested_course.degree_program_id
         and requested_course.degree_program_id != student.degree_program_id
         and requested_course.shareable
-        and normalize_context_key(requested_course.context_key)
-        == normalize_context_key(eligibility_course.context_key)
+        and course_equivalence_key(requested_course) == course_equivalence_key(eligibility_course)
         and regular_relation_for_student(requested_course, student, eligibility_course) == "reoffer"
     ):
         return requested_course
@@ -520,16 +518,21 @@ def suggestion_courses_for_student(
     reoffer_contexts = pending_reoffer_contexts(db, student, completed_contexts)
     equivalent_reoffers: list[Course] = []
     if reoffer_contexts:
-        equivalent_reoffers = (
+        reoffer_candidates = (
             db.query(Course)
             .filter(
                 Course.shareable.is_(True),
-                Course.context_key.in_(reoffer_contexts),
                 Course.degree_program_id.is_not(None),
                 Course.degree_program_id != student.degree_program_id,
             )
             .all()
         )
+        equivalent_reoffers = [
+            course
+            for course in reoffer_candidates
+            if (equivalence_key := course_equivalence_key(course))
+            and equivalence_key in reoffer_contexts
+        ]
     deduped = {course.id: course for course in own_or_institutional + equivalent_reoffers}
     return sorted(
         deduped.values(),
@@ -546,19 +549,18 @@ def pending_reoffer_contexts(
     db: Session,
     student: Student,
     completed_contexts: dict[str, StudentCourseHistory],
-) -> set[str]:
+) -> set[tuple[str, ...]]:
     contexts = {
-        context_key
+        equivalence_key
         for course in db.query(Course)
         .filter(
             Course.degree_program_id == student.degree_program_id,
             Course.shareable.is_(True),
-            Course.context_key.is_not(None),
             Course.recommended_semester < student.current_semester,
         )
         .all()
-        if (context_key := normalize_context_key(course.context_key))
-        and context_key not in completed_contexts
+        if (equivalence_key := course_equivalence_key(course))
+        and course_completion_key(course) not in completed_contexts
     }
     failed_course_ids = [
         item.course_id
@@ -574,11 +576,10 @@ def pending_reoffer_contexts(
     if failed_course_ids:
         failed_courses = db.query(Course).filter(Course.id.in_(failed_course_ids)).all()
         contexts.update(
-            context_key
+            equivalence_key
             for course in failed_courses
-            if course.shareable
-            and (context_key := normalize_context_key(course.context_key))
-            and context_key not in completed_contexts
+            if (equivalence_key := course_equivalence_key(course))
+            and course_completion_key(course) not in completed_contexts
         )
     return contexts
 
@@ -604,21 +605,21 @@ def completed_contexts_by_course(
         return {}
     completed_courses = (
         db.query(Course)
-        .filter(Course.id.in_(completed.keys()), Course.context_key.is_not(None), Course.shareable.is_(True))
+        .filter(Course.id.in_(completed.keys()), Course.shareable.is_(True))
         .all()
     )
     return {
-        context_key: completed[course.id]
+        completion_key: completed[course.id]
         for course in completed_courses
-        if (context_key := normalize_context_key(course.context_key)) and course.id in completed
+        if (completion_key := course_completion_key(course)) and course.id in completed
     }
 
 
 def course_completed_by_context(
     course: Course, completed_contexts: dict[str, StudentCourseHistory]
 ) -> bool:
-    context_key = normalize_context_key(course.context_key)
-    return bool(course.shareable and context_key and context_key in completed_contexts)
+    completion_key = course_completion_key(course)
+    return bool(completion_key and completion_key in completed_contexts)
 
 
 def course_eligible_for_student(db: Session, student: Student, course: Course) -> bool:
@@ -658,16 +659,23 @@ def canonical_course_for_student(db: Session, student: Student, course: Course) 
 def eligibility_course_for_student(db: Session, student: Student, course: Course) -> Course | None:
     if not course.degree_program_id or course.degree_program_id == student.degree_program_id:
         return course
-    context_key = normalize_context_key(course.context_key)
-    if context_key and course.shareable:
-        return (
+    equivalence_key = course_equivalence_key(course)
+    if equivalence_key:
+        own_courses = (
             db.query(Course)
             .filter(
                 Course.degree_program_id == student.degree_program_id,
-                Course.context_key == context_key,
                 Course.shareable.is_(True),
             )
-            .first()
+            .all()
+        )
+        return next(
+            (
+                own_course
+                for own_course in own_courses
+                if course_equivalence_key(own_course) == equivalence_key
+            ),
+            None,
         )
     return None
 
@@ -688,8 +696,7 @@ def demand_course_for_student(
         and requested_course.degree_program_id
         and requested_course.degree_program_id != student.degree_program_id
         and requested_course.shareable
-        and normalize_context_key(requested_course.context_key)
-        == normalize_context_key(eligibility_course.context_key)
+        and course_equivalence_key(requested_course) == course_equivalence_key(eligibility_course)
         and regular_relation_for_student(requested_course, student, eligibility_course) == "reoffer"
     ):
         return requested_course
@@ -723,9 +730,18 @@ def is_regular_for_student(
     return regular_relation_for_student(course, student, eligibility_course) == "regular"
 
 
-def normalize_context_key(context_key: str | None) -> str | None:
-    normalized = (context_key or "").strip().lower()
-    return normalized or None
+def course_equivalence_key(course: Course) -> tuple[str, ...] | None:
+    return academic_group_identity(course)
+
+
+def course_completion_key(course: Course) -> str | None:
+    if not course.shareable:
+        return None
+    if equivalence_key := course_equivalence_key(course):
+        return "academic|" + "|".join(equivalence_key)
+    if context_key := academic_context_key(course):
+        return f"context|{context_key}"
+    return None
 
 
 def restrictions_for_courses(
@@ -759,7 +775,7 @@ def requirement_satisfied(
         and required_course.context_key
         and completed_contexts
     ):
-        equivalent_history = completed_contexts.get(normalize_context_key(required_course.context_key))
+        equivalent_history = completed_contexts.get(course_completion_key(required_course) or "")
         if equivalent_history and history_satisfies_minimum(equivalent_history, restriction):
             return True
     return False

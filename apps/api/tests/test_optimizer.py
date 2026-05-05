@@ -284,7 +284,7 @@ def test_course_uses_room_in_compatible_campus(db_session) -> None:
     assert assignment.room_id == right_room.id
 
 
-def test_shared_context_does_not_merge_courses_from_different_campuses(db_session) -> None:
+def test_lab_shared_context_does_not_merge_courses_from_different_campuses(db_session) -> None:
     anglo = Campus(name="Campus Anglo")
     capao = Campus(name="Campus Capao")
     production = DegreeProgram(name="Engenharia de Producao", code="EP", campus_id=anglo.id)
@@ -306,6 +306,7 @@ def test_shared_context_does_not_merge_courses_from_different_campuses(db_sessio
                 kind=CourseKind.mandatory,
                 recommended_semester=1,
                 expected_demand=20,
+                requires_lab=True,
                 context_key="calculo-a",
                 shareable=True,
             ),
@@ -318,6 +319,7 @@ def test_shared_context_does_not_merge_courses_from_different_campuses(db_sessio
                 kind=CourseKind.mandatory,
                 recommended_semester=1,
                 expected_demand=25,
+                requires_lab=True,
                 context_key="calculo-a",
                 shareable=True,
             ),
@@ -612,6 +614,69 @@ def test_courses_with_teacher_suffix_are_planned_as_one_offer(db_session) -> Non
     assert shared_course.id in snapshot.qualifications[professor_four.id]
 
 
+def test_equivalent_regular_courses_with_same_turn_are_absorbed_into_one_offer_for_any_subject(
+    db_session,
+) -> None:
+    production = DegreeProgram(
+        name="Engenharia de Producao",
+        code="EP",
+        schedule_start_minute=19 * 60,
+        schedule_end_minute=22 * 60,
+    )
+    civil = DegreeProgram(
+        name="Engenharia Civil",
+        code="EC",
+        schedule_start_minute=18 * 60,
+        schedule_end_minute=22 * 60,
+    )
+    db_session.add_all([production, civil])
+    db_session.flush()
+    production_chemistry = Course(
+        name="QUÍMICA GERAL (T1)",
+        degree_program_id=production.id,
+        workload_hours=4,
+        theoretical_hours=4,
+        practical_hours=0,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=1,
+        context_key="ufpel:15001001:t1",
+        shareable=True,
+    )
+    civil_chemistry = Course(
+        name="QUÍMICA GERAL (T2)",
+        degree_program_id=civil.id,
+        workload_hours=4,
+        theoretical_hours=4,
+        practical_hours=0,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+        context_key="ufpel:15001001:t2",
+        shareable=True,
+    )
+    students = [
+        Student(name="Aluno EP", degree_program_id=production.id, current_semester=2),
+        *[
+            Student(name=f"Aluno EC {index}", degree_program_id=civil.id, current_semester=2)
+            for index in range(20)
+        ],
+    ]
+    db_session.add_all([production_chemistry, civil_chemistry, *students])
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+    shared_course = snapshot.courses[0]
+
+    assert len(snapshot.courses) == 1
+    assert shared_course.name == "QUÍMICA GERAL (2 cursos)"
+    assert shared_course.expected_demand == 21
+    assert shared_course.context_key == "ufpel:15001001"
+    assert shared_course.course_turns == ("noturno",)
+    assert set(shared_course.source_course_ids) == {production_chemistry.id, civil_chemistry.id}
+    assert snapshot.student_demand_plan["unplanned_request_count"] == 0
+
+
 def test_demand_planner_closes_marginal_course_when_second_option_absorbs_students(
     db_session,
 ) -> None:
@@ -693,6 +758,87 @@ def test_demand_planner_closes_marginal_course_when_second_option_absorbs_studen
     assert snapshot.student_demand_plan["alternative_assignments"] == 3
     assert snapshot.student_demand_plan["consolidated_choice_groups"] == 3
     assert snapshot.student_demand_plan["unplanned_choice_groups"] == 0
+    assert diagnose_snapshot(snapshot) == []
+
+
+def test_regular_floor_participates_in_solver_and_absorbs_reoffer_options(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    physics = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    regular_student = Student(
+        name="Aluno regular",
+        degree_program_id=program.id,
+        current_semester=2,
+    )
+    reoffer_students = [
+        Student(name=f"Aluno reoferta {index}", degree_program_id=program.id, current_semester=3)
+        for index in range(2)
+    ]
+    professor = Professor(name="Docente Calculo")
+    room = Room(name="Sala 50", capacity=50, kind=RoomKind.lecture)
+    slot = TimeSlot(day=0, start_minute=480, end_minute=600, label="Seg 08-10")
+    db_session.add_all([calculus, physics, regular_student, *reoffer_students, professor, room, slot])
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProfessorContract(professor_id=professor.id, min_hours=0, max_hours=4),
+            ProfessorQualification(professor_id=professor.id, course_id=calculus.id),
+        ]
+    )
+    for index, student in enumerate(reoffer_students):
+        group = f"trajetoria-{index}"
+        db_session.add_all(
+            [
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=physics.id,
+                    target_semester="2026/2",
+                    preference_order=1,
+                    alternative_group=group,
+                    priority=5,
+                ),
+                StudentCourseRequest(
+                    student_id=student.id,
+                    course_id=calculus.id,
+                    target_semester="2026/2",
+                    preference_order=2,
+                    alternative_group=group,
+                    priority=5,
+                ),
+            ]
+        )
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+
+    assert [course.name for course in snapshot.courses] == ["Calculo A"]
+    assert snapshot.courses[0].expected_demand == 3
+    assert snapshot.student_demand_plan["mandatory_regular_demand_by_course"] == {calculus.id: 1}
+    assert snapshot.student_demand_plan["selected_incremental_request_demand_by_course"] == {
+        calculus.id: 2
+    }
+    assert snapshot.student_demand_plan["selected_demand_by_course"] == {calculus.id: 3}
+    assert snapshot.student_demand_plan["alternative_assignments"] == 2
     assert diagnose_snapshot(snapshot) == []
 
 
