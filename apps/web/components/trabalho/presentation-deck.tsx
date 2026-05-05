@@ -197,6 +197,8 @@ function SlideContent({ slug, onNext }: { slug: TrabalhoSlideSlug; onNext: () =>
       return <StudentQrSlide onNext={onNext} />;
     case "parametros":
       return <ParametersSlide onNext={onNext} />;
+    case "fluxo-otimizacao":
+      return <OptimizationFlowSlide />;
     case "comparacao":
       return <ComparisonSlide />;
     case "resultado":
@@ -445,6 +447,82 @@ function ComparisonSlide() {
           "Limite: MVP acadêmico ainda menor que uma operação aérea industrial."
         ]}
       />
+    </section>
+  );
+}
+
+function OptimizationFlowSlide() {
+  const steps = [
+    {
+      title: "Piso obrigatório",
+      text: "Primeiro o sistema identifica as disciplinas regulares que precisam existir: aluno no semestre certo, pré-requisitos cumpridos e turno oficial do curso.",
+      icon: GraduationCap
+    },
+    {
+      title: "Demanda estudantil",
+      text: "Depois lê as filas de preferência dos alunos, inclusive escolhas compostas do tipo quero X, senão Y e Z.",
+      icon: Users
+    },
+    {
+      title: "Equivalências",
+      text: "Cadeiras com mesmo contexto acadêmico, carga horária e conteúdo compatível podem ser agrupadas entre cursos antes de abrir turmas pequenas.",
+      icon: BookOpen
+    },
+    {
+      title: "Tamanho das turmas",
+      text: "O solver evita sobras de 1 ou 2 alunos, redistribui demanda e divide turmas de forma balanceada conforme capacidade real das salas.",
+      icon: CalendarDays
+    },
+    {
+      title: "Agenda e docentes",
+      text: "A grade é montada respeitando sala, professor, disponibilidade, habilitação, laboratório, carga máxima e restrições complexas.",
+      icon: CheckCircle2
+    },
+    {
+      title: "Matrícula automática",
+      text: "Por fim, a alocação usa pontuação, atraso, reprovação e notas das dependências, com resgate para não deixar aluno sem semestre.",
+      icon: Cpu
+    }
+  ];
+
+  return (
+    <section className="grid max-h-full gap-4">
+      <div className="max-w-5xl">
+        <p className="text-sm font-semibold uppercase text-lake">Ordem de execução</p>
+        <h2 className="mt-2 text-3xl font-semibold leading-tight sm:text-5xl">
+          O problema é quebrado em decisões menores antes da grade final.
+        </h2>
+        <p className="mt-3 max-w-3xl text-sm leading-relaxed text-slate-700">
+          A estratégia segue a lógica da Pesquisa Operacional: fixar o que não pode faltar,
+          reduzir alternativas equivalentes e só então otimizar horários, salas, professores e matrícula.
+        </p>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {steps.map((step, index) => (
+          <motion.div
+            key={step.title}
+            initial={{ opacity: 0, y: 14 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: index * 0.06 }}
+            className="rounded-md border border-slateLine bg-white px-4 py-3 shadow-panel transition hover:-translate-y-0.5 hover:border-lake/40"
+          >
+            <div className="flex items-center gap-3">
+              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-lake/10 text-lake">
+                <step.icon size={18} />
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase text-slate-500">Etapa {index + 1}</div>
+                <h3 className="text-base font-semibold">{step.title}</h3>
+              </div>
+            </div>
+            <p className="mt-3 text-sm leading-relaxed text-slate-700">{step.text}</p>
+          </motion.div>
+        ))}
+      </div>
+      <div className="rounded-md border border-moss/25 bg-moss/10 px-4 py-3 text-sm leading-relaxed text-slate-700">
+        No run final do piloto, essa sequência fechou com 0 conflitos hard, 0 demandas pendentes,
+        0 turmas abaixo do mínimo e 0 alunos sem matrícula após a etapa de resgate.
+      </div>
     </section>
   );
 }

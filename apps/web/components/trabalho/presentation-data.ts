@@ -9,6 +9,7 @@ export type TrabalhoSlideSlug =
   | "professor"
   | "alunos"
   | "parametros"
+  | "fluxo-otimizacao"
   | "comparacao"
   | "resultado"
   | "conclusao";
@@ -31,9 +32,10 @@ export const trabalhoSlides: TrabalhoSlide[] = [
   { index: 8, slug: "professor", title: "Aplicação do professor", eyebrow: "QR Code temporário" },
   { index: 9, slug: "alunos", title: "Aplicação dos alunos", eyebrow: "Demanda real" },
   { index: 10, slug: "parametros", title: "Parâmetros do piloto", eyebrow: "Recursos e máquina" },
-  { index: 11, slug: "comparacao", title: "Comparação dos projetos", eyebrow: "Air NZ x OptiGrade" },
-  { index: 12, slug: "resultado", title: "Resultado da otimização", eyebrow: "Calendário final" },
-  { index: 13, slug: "conclusao", title: "Conclusão textual", eyebrow: "Síntese acadêmica" }
+  { index: 11, slug: "fluxo-otimizacao", title: "Como a otimização roda", eyebrow: "Método do OptiGrade" },
+  { index: 12, slug: "comparacao", title: "Comparação dos projetos", eyebrow: "Air NZ x OptiGrade" },
+  { index: 13, slug: "resultado", title: "Resultado da otimização", eyebrow: "Calendário final" },
+  { index: 14, slug: "conclusao", title: "Conclusão textual", eyebrow: "Síntese acadêmica" }
 ];
 
 export const slideAliases = Object.fromEntries(
