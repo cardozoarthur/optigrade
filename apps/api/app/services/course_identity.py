@@ -7,11 +7,31 @@ from app.models.entities import Course
 
 TRAILING_PARENTHETICAL_RE = re.compile(r"\s*\([^()]*\)\s*$")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+CLASS_SUFFIX_RE = re.compile(r"^[a-z]{1,3}\d+[a-z]?$")
+SUFFIX_EQUIVALENT_NAME_KEYS = {"trabalho-de-conclusao-de-curso"}
 
 
 def normalize_context_key(context_key: str | None) -> str | None:
     normalized = (context_key or "").strip().lower()
     return normalized or None
+
+
+def canonical_context_key(context_key: str | None) -> str | None:
+    normalized = normalize_context_key(context_key)
+    if not normalized:
+        return None
+    parts = normalized.split(":")
+    if len(parts) > 1 and CLASS_SUFFIX_RE.fullmatch(parts[-1]):
+        return ":".join(parts[:-1])
+    return normalized
+
+
+def academic_context_key(course: Course) -> str | None:
+    context_key = normalize_context_key(course.context_key)
+    name_key = normalized_course_name_key(course.name)
+    if name_key in SUFFIX_EQUIVALENT_NAME_KEYS:
+        return canonical_context_key(context_key)
+    return context_key
 
 
 def course_base_name(name: str) -> str:
@@ -37,7 +57,7 @@ def normalized_course_name_key(name: str | None) -> str | None:
 
 
 def academic_group_identity(course: Course, theoretical_hours: int | None = None) -> tuple[str, ...] | None:
-    context_key = normalize_context_key(course.context_key)
+    context_key = academic_context_key(course)
     name_key = normalized_course_name_key(course.name)
     identity_key = context_key or name_key
     if not course.shareable or not identity_key:

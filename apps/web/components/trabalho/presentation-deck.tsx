@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import {
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   BookOpen,
@@ -452,7 +453,8 @@ function ResultSlide() {
   const { run, assignments, optimizationStartedAt, optimizationError, startOptimization, refreshOptimization } = usePresentation();
   const [elapsed, setElapsed] = useState(0);
   const [catalog, setCatalog] = useState<CalendarCatalog | null>(null);
-  const running = !run || run.status === "pending" || run.status === "running";
+  const optimizationFinished = Boolean(run?.metrics?.optimization_status);
+  const running = !run || ((run.status === "pending" || run.status === "running") && !optimizationFinished);
   const runId = run?.id;
   const runStatus = run?.status;
 
@@ -513,18 +515,48 @@ function ResultSlide() {
     );
   }
 
+  const sectionPlans = plannedSectionsFromMetrics(run.metrics);
+  const hardDiagnostics = hardDiagnosticsFromMetrics(run.metrics);
+  const unplannedDemandRequests =
+    metricNumber(run.metrics?.student_demand_plan?.unplanned_request_count) ??
+    metricNumber(run.metrics?.student_demand_plan?.unplanned_choice_groups);
+  const sectionsBelowMinimum = sectionPlans.filter(
+    (section) => section.planned_students > 0 && section.planned_students < 3
+  ).length;
+  const unservedSectionDemand = sectionPlans.reduce(
+    (total, section) => total + Math.max(0, section.planned_unserved_demand ?? 0),
+    0
+  );
+  const sectionIssues = sectionPlans.filter(
+    (section) =>
+      (section.planned_students > 0 && section.planned_students < 3) ||
+      (section.planned_unserved_demand ?? 0) > 0
+  );
+  const displayStatus = run.metrics?.optimization_status ?? run.status;
+
   return (
     <section className="grid gap-5 pb-6">
-      <div className="grid gap-3 md:grid-cols-5">
-        <MetricTile label="Status" value={run.status} tone={run.status === "feasible" ? "green" : "amber"} />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+        <MetricTile label="Status" value={displayStatus} tone={displayStatus === "feasible" ? "green" : "amber"} />
         <MetricTile label="Tempo total" value={formatMs(Number(run.metrics?.elapsed_ms ?? 0))} />
-        <MetricTile label="Conflitos hard" value={String(run.metrics?.hard_conflicts ?? "-")} />
+        <MetricTile
+          label="Conflitos hard"
+          value={String(run.metrics?.hard_conflicts ?? "-")}
+          tone={(run.metrics?.hard_conflicts ?? 0) > 0 ? "amber" : "green"}
+        />
         <MetricTile label="Alocados" value={String(run.metrics?.enrollment_round?.enrolled ?? "-")} tone="green" />
-        <MetricTile label="Turmas abertas" value={String((run.metrics?.planned_sections as unknown[] | undefined)?.length ?? "-")} />
+        <MetricTile label="Turmas abertas" value={String(sectionPlans.length || "-")} />
         <MetricTile label="Alternativas usadas" value={String(run.metrics?.student_demand_plan?.alternative_assignments ?? "-")} />
-        <MetricTile label="Sem turma mínima" value={String(run.metrics?.student_demand_plan?.unplanned_choice_groups ?? "-")} tone="amber" />
+        <MetricTile label="Demandas não planejadas" value={String(unplannedDemandRequests ?? "-")} tone="amber" />
+        <MetricTile label="Turmas abaixo do mínimo" value={String(sectionsBelowMinimum)} tone={sectionsBelowMinimum ? "amber" : "green"} />
+        <MetricTile label="Sobras sem turma" value={String(unservedSectionDemand)} tone={unservedSectionDemand ? "amber" : "green"} />
       </div>
-      <CalendarPreview assignments={assignments} catalog={catalog} sectionPlans={plannedSectionsFromMetrics(run.metrics)} />
+      <ResultDiagnostics
+        hardDiagnostics={hardDiagnostics}
+        sectionIssues={sectionIssues}
+        unplannedDemandRequests={unplannedDemandRequests ?? 0}
+      />
+      <CalendarPreview assignments={assignments} catalog={catalog} sectionPlans={sectionPlans} />
     </section>
   );
 }
@@ -755,6 +787,120 @@ type PlannedSection = {
   source_course_ids?: string[];
 };
 
+type HardDiagnostic = {
+  code?: string;
+  message?: string;
+  course_id?: string;
+  assignment?: string;
+  session_index?: number;
+  [key: string]: unknown;
+};
+
+function ResultDiagnostics({
+  hardDiagnostics,
+  sectionIssues,
+  unplannedDemandRequests
+}: {
+  hardDiagnostics: HardDiagnostic[];
+  sectionIssues: PlannedSection[];
+  unplannedDemandRequests: number;
+}) {
+  const hasProblems = hardDiagnostics.length > 0 || sectionIssues.length > 0 || unplannedDemandRequests > 0;
+  if (!hasProblems) {
+    return (
+      <Panel className="border-moss/30 bg-moss/10">
+        <div className="flex items-center gap-3">
+          <CheckCircle2 size={22} className="text-moss" />
+          <div>
+            <h2 className="text-lg font-semibold">Sem pendências operacionais no resultado</h2>
+            <p className="text-sm text-slate-700">
+              A rodada não retornou conflitos hard, sobras de demanda ou turmas abaixo do mínimo planejado.
+            </p>
+          </div>
+        </div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel className="border-amber/40 bg-amber/10">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <AlertTriangle size={22} className="mt-1 text-amber" />
+          <div>
+            <h2 className="text-lg font-semibold">Pendências para correção da rodada</h2>
+            <p className="text-sm text-slate-700">
+              “Demandas não planejadas” são pedidos dos alunos que o planejador deixou fora por baixa demanda,
+              conflito de restrição ou alternativa melhor. “Turmas abaixo do mínimo” só conta turmas abertas com
+              menos de 3 inscritos.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <a
+            href="/app/planejamento"
+            className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-slateLine bg-white px-3 text-sm font-semibold transition hover:-translate-y-0.5 hover:border-lake hover:text-lake"
+          >
+            Abrir planejamento <ExternalLink size={15} />
+          </a>
+          <a
+            href="/app/cadastros/cadeiras"
+            className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-slateLine bg-white px-3 text-sm font-semibold transition hover:-translate-y-0.5 hover:border-lake hover:text-lake"
+          >
+            Editar cadeiras <ExternalLink size={15} />
+          </a>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        {hardDiagnostics.length ? (
+          <div className="rounded-md border border-white/80 bg-white p-3">
+            <h3 className="text-sm font-semibold uppercase text-slate-600">Conflitos hard</h3>
+            <div className="mt-2 grid max-h-64 gap-2 overflow-auto pr-1">
+              {hardDiagnostics.map((item, index) => (
+                <div key={`${item.code ?? "diagnostic"}-${index}`} className="rounded-md border border-slateLine px-3 py-2 text-xs">
+                  <div className="font-semibold text-ink">{item.message ?? item.code ?? "Restrição obrigatória"}</div>
+                  <div className="mt-1 text-slate-600">
+                    {item.code ? `Código: ${item.code}` : null}
+                    {item.course_id ? ` · Curso: ${item.course_id}` : null}
+                    {item.assignment ? ` · Oferta: ${item.assignment}` : null}
+                    {typeof item.session_index === "number" ? ` · Sessão: ${item.session_index + 1}` : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {sectionIssues.length || unplannedDemandRequests > 0 ? (
+          <div className="rounded-md border border-white/80 bg-white p-3">
+            <h3 className="text-sm font-semibold uppercase text-slate-600">Demanda e turmas</h3>
+            <div className="mt-2 grid gap-2 text-xs">
+              {unplannedDemandRequests > 0 ? (
+                <div className="rounded-md border border-slateLine px-3 py-2">
+                  <div className="font-semibold text-ink">{unplannedDemandRequests} pedidos ficaram fora do plano</div>
+                  <div className="mt-1 text-slate-600">
+                    Isso não significa turma aberta com 1 ou 2 alunos; significa demanda discente descartada ou redirecionada
+                    antes da abertura final de turmas.
+                  </div>
+                </div>
+              ) : null}
+              {sectionIssues.map((section) => (
+                <div key={`${section.db_course_id}-${section.section_index}`} className="rounded-md border border-slateLine px-3 py-2">
+                  <div className="font-semibold text-ink">{section.section_label}</div>
+                  <div className="mt-1 text-slate-600">
+                    {section.planned_students} inscritos planejados
+                    {section.planned_unserved_demand ? ` · ${section.planned_unserved_demand} sem turma` : ""}
+                    {section.strategy ? ` · ${section.strategy}` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </Panel>
+  );
+}
+
 function CalendarPreview({
   assignments,
   catalog,
@@ -849,6 +995,12 @@ function plannedSectionsFromMetrics(metrics: OptimizationRun["metrics"] | null |
   return plannedSections.filter(isPlannedSection);
 }
 
+function hardDiagnosticsFromMetrics(metrics: OptimizationRun["metrics"] | null | undefined): HardDiagnostic[] {
+  const diagnostics = metrics?.hard_diagnostics;
+  if (!Array.isArray(diagnostics)) return [];
+  return diagnostics.filter(isHardDiagnostic).slice(0, 20);
+}
+
 function isPlannedSection(value: unknown): value is PlannedSection {
   if (!value || typeof value !== "object") return false;
   const section = value as Partial<PlannedSection>;
@@ -858,6 +1010,21 @@ function isPlannedSection(value: unknown): value is PlannedSection {
     typeof section.section_label === "string" &&
     typeof section.planned_students === "number"
   );
+}
+
+function isHardDiagnostic(value: unknown): value is HardDiagnostic {
+  if (!value || typeof value !== "object") return false;
+  const diagnostic = value as Partial<HardDiagnostic>;
+  return (
+    typeof diagnostic.code === "string" ||
+    typeof diagnostic.message === "string" ||
+    typeof diagnostic.course_id === "string" ||
+    typeof diagnostic.assignment === "string"
+  );
+}
+
+function metricNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function indexBy<T extends { id: string }>(items: T[]) {

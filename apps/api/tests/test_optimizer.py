@@ -479,6 +479,7 @@ def test_courses_with_teacher_suffix_are_planned_as_one_offer(db_session) -> Non
         kind=CourseKind.mandatory,
         recommended_semester=10,
         expected_demand=3,
+        context_key="ufpel:15000963:t1",
     )
     tcc_four = Course(
         name="TRABALHO DE CONCLUSÃO DE CURSO (T4)",
@@ -488,6 +489,7 @@ def test_courses_with_teacher_suffix_are_planned_as_one_offer(db_session) -> Non
         kind=CourseKind.mandatory,
         recommended_semester=10,
         expected_demand=3,
+        context_key="ufpel:15000963:t4",
     )
     professor_one = Professor(name="Docente T1")
     professor_four = Professor(name="Docente T4")
@@ -511,6 +513,7 @@ def test_courses_with_teacher_suffix_are_planned_as_one_offer(db_session) -> Non
     assert len(snapshot.courses) == 1
     assert shared_course.name == "TRABALHO DE CONCLUSÃO DE CURSO (2 cursos)"
     assert shared_course.expected_demand == 6
+    assert shared_course.context_key == "ufpel:15000963"
     assert set(shared_course.source_course_ids) == {tcc_one.id, tcc_four.id}
     assert shared_course.id in snapshot.qualifications[professor_one.id]
     assert shared_course.id in snapshot.qualifications[professor_four.id]
@@ -523,9 +526,19 @@ def test_planned_sections_are_balanced_when_multiple_classes_are_opened() -> Non
         "balanced_additional_section",
     )
     assert planned_section_sizes_from_capacity(103, 50, 60) == (
-        [52, 51],
+        [35, 34, 34],
         0,
-        "balanced_absorbed_remainder",
+        "balanced_additional_section",
+    )
+    assert planned_section_sizes_from_capacity(83, 50, 200) == (
+        [42, 41],
+        0,
+        "balanced_additional_section",
+    )
+    assert planned_section_sizes_from_capacity(52, 50, 60) == (
+        [52],
+        0,
+        "balanced_absorbed_small_remainder",
     )
 
 

@@ -40,9 +40,9 @@ from app.services.student_planning import (
     student_demand_choice_summary,
 )
 from app.services.course_identity import (
+    academic_context_key,
     academic_group_identity,
     course_base_name,
-    normalize_context_key,
     normalized_course_name_key,
 )
 
@@ -259,6 +259,29 @@ def run_optimization(db: Session, run: OptimizationRun) -> OptimizationRun:
         feasible = [solution for solution in improved if solution.objectives["hard_conflicts"] == 0]
         ranked = sorted(feasible or improved, key=lambda item: item.score)
         best = ranked[0]
+        if demand_driven and best.objectives["hard_conflicts"] > 0:
+            repaired_snapshot, repair_pruning = repair_snapshot_for_unplaced_sections(snapshot, best)
+            if repair_pruning:
+                repair_attempts = min(attempts, 16)
+                repair_workers = max(1, min(settings.optigrade_max_threads, repair_attempts, max_worker_cap))
+                repair_seeds = [random.randrange(1_000_000_000) for _ in range(repair_attempts)]
+                with ThreadPoolExecutor(max_workers=repair_workers) as executor:
+                    repair_solutions = list(
+                        executor.map(lambda seed: build_solution(repaired_snapshot, seed), repair_seeds)
+                    )
+                repair_improved = [
+                    improve_solution(repaired_snapshot, solution, local_steps)
+                    for solution in repair_solutions
+                ]
+                repair_feasible = [
+                    solution for solution in repair_improved if solution.objectives["hard_conflicts"] == 0
+                ]
+                repair_ranked = sorted(repair_feasible or repair_improved, key=lambda item: item.score)
+                repair_best = repair_ranked[0]
+                if repair_best.objectives["hard_conflicts"] < best.objectives["hard_conflicts"]:
+                    snapshot = repaired_snapshot
+                    ranked = repair_ranked
+                    best = repair_best
 
     run.assignments.clear()
     course_by_snapshot_id = {course.id: course for course in snapshot.courses}
@@ -1062,7 +1085,7 @@ def demand_small_excess_count(demand: int, regular_capacity: int, large_capacity
     full_sections, remainder = divmod(demand, regular_capacity)
     if remainder == 0 or remainder >= PLANNING_MIN_SECTION_DEMAND:
         return 0
-    if large_capacity and full_sections and demand <= full_sections * large_capacity:
+    if large_capacity and full_sections and math.ceil(demand / full_sections) <= large_capacity:
         return 0
     return remainder
 
@@ -1149,7 +1172,7 @@ def demand_planning_bucket_metrics(
 
 def demand_bucket_label(group: list[Course]) -> str:
     representative = group[0]
-    context_key = normalize_context_key(representative.context_key)
+    context_key = academic_context_key(representative)
     if len(group) > 1 and context_key:
         return f"context:{context_key}:{representative.campus_id or 'any'}"
     return f"course:{representative.id}"
@@ -1289,6 +1312,104 @@ def redistribute_sections_after_teacher_pruning(
     ]
 
 
+def repair_snapshot_for_unplaced_sections(
+    snapshot: Snapshot,
+    solution: CandidateSolution,
+) -> tuple[Snapshot, list[dict[str, Any]]]:
+    diagnostics = solution.metrics.get("hard_diagnostics")
+    if not isinstance(diagnostics, list) or not diagnostics:
+        return snapshot, []
+    if any(
+        not isinstance(item, dict) or item.get("code") != "unplaced_session"
+        for item in diagnostics
+    ):
+        return snapshot, []
+
+    course_by_id = {course.id: course for course in snapshot.courses}
+    unplaced_course_ids = {
+        str(item["course_id"])
+        for item in diagnostics
+        if isinstance(item, dict) and isinstance(item.get("course_id"), str)
+    }
+    if not unplaced_course_ids:
+        return snapshot, []
+
+    courses_by_family: dict[tuple[Any, ...], list[CourseData]] = {}
+    for course in snapshot.courses:
+        courses_by_family.setdefault(section_family_key(course), []).append(course)
+
+    removed_course_ids: set[str] = set()
+    for family_courses in courses_by_family.values():
+        problematic = sorted(
+            [course for course in family_courses if course.id in unplaced_course_ids],
+            key=lambda course: course.section_index,
+            reverse=True,
+        )
+        if not problematic or len(family_courses) <= 1:
+            continue
+        removable_count = min(len(problematic), len(family_courses) - 1)
+        removed_course_ids.update(course.id for course in problematic[:removable_count])
+    if not removed_course_ids:
+        return snapshot, []
+
+    repair_items = [
+        {
+            "course_id": course.id,
+            "course_name": course.name,
+            "db_course_id": course.source_course_ids[0] if course.source_course_ids else course.id,
+            "planned_students": course.expected_demand,
+            "section_index": course.section_index,
+            "required_hours": course_required_hours(course),
+            "reason": "Secao removida automaticamente porque a rodada nao conseguiu alocar todas as sessoes obrigatorias.",
+        }
+        for course_id in sorted(removed_course_ids)
+        if (course := course_by_id.get(course_id))
+    ]
+    redistribution_items = [dict(item) for item in repair_items]
+    repaired_courses, unserved_pruning = redistribute_sections_after_teacher_pruning(
+        snapshot.courses,
+        removed_course_ids,
+        redistribution_items,
+        snapshot.rooms,
+    )
+    kept_course_ids = {course.id for course in repaired_courses}
+    repaired_plan = dict(snapshot.student_demand_plan or {})
+    repaired_plan["solver_repair_removed_sections"] = repair_items
+    repaired_plan["solver_repair_unserved_sections"] = unserved_pruning
+    repaired_plan["solver_repair_unplanned_students"] = sum(
+        int(item.get("planned_students") or 0) for item in unserved_pruning
+    )
+    return (
+        replace(
+            snapshot,
+            courses=repaired_courses,
+            qualifications={
+                professor_id: course_ids & kept_course_ids
+                for professor_id, course_ids in snapshot.qualifications.items()
+                if course_ids & kept_course_ids
+            },
+            preferences={
+                professor_id: {
+                    course_id: preference
+                    for course_id, preference in professor_preferences.items()
+                    if course_id in kept_course_ids
+                }
+                for professor_id, professor_preferences in snapshot.preferences.items()
+                if any(course_id in kept_course_ids for course_id in professor_preferences)
+            },
+            source_course_to_snapshot_course={
+                source_course_id: tuple(
+                    course_id for course_id in snapshot_course_ids if course_id in kept_course_ids
+                )
+                for source_course_id, snapshot_course_ids in snapshot.source_course_to_snapshot_course.items()
+                if any(course_id in kept_course_ids for course_id in snapshot_course_ids)
+            },
+            student_demand_plan=repaired_plan,
+        ),
+        repair_items,
+    )
+
+
 def max_compatible_section_capacity(course: CourseData, rooms: list[RoomData]) -> int:
     capacities = [
         room.capacity
@@ -1426,7 +1547,7 @@ def demand_driven_courses(
 
 
 def course_group_key(course: Course) -> tuple[Any, ...]:
-    context_key = normalize_context_key(course.context_key)
+    context_key = academic_context_key(course)
     theoretical_hours = effective_theoretical_hours(course)
     academic_identity = academic_group_identity(course, theoretical_hours)
     if academic_identity:
@@ -1447,7 +1568,7 @@ def merge_course_group(
 ) -> CourseData:
     representative = group[0]
     source_ids = tuple(course.id for course in group)
-    context_key = normalize_context_key(representative.context_key)
+    context_key = academic_context_key(representative)
     name_identity = normalized_course_name_key(representative.name)
     effective_identity = context_key or name_identity
     theoretical_hours = effective_theoretical_hours(representative)
@@ -1507,7 +1628,7 @@ def merge_course_group(
         campus_names=campus_names,
         degree_program_names=degree_program_names,
         regular_time_windows=regular_time_windows_for_group(group, degree_program_by_id),
-        official_schedule=official_schedule_for_group(group),
+        official_schedule=official_schedule_for_group(group, demand_driven=demand_driven),
         requested_time_windows=merge_requested_time_windows(
             group,
             requested_time_windows_by_course,
@@ -1576,8 +1697,13 @@ def planned_section_sizes_from_capacity(
     full_sections, remainder = divmod(demand, regular_capacity)
     if remainder == 0:
         return balanced_section_sizes(demand, full_sections), 0, "balanced_regular_sections"
-    if large_capacity and full_sections and demand <= full_sections * large_capacity:
-        return balanced_section_sizes(demand, full_sections), 0, "balanced_absorbed_remainder"
+    if (
+        remainder < PLANNING_MIN_SECTION_DEMAND
+        and large_capacity
+        and full_sections
+        and math.ceil(demand / full_sections) <= large_capacity
+    ):
+        return balanced_section_sizes(demand, full_sections), 0, "balanced_absorbed_small_remainder"
     section_count = full_sections + 1
     return balanced_section_sizes(demand, section_count), 0, "balanced_additional_section"
 
@@ -1616,7 +1742,7 @@ def stable_context_course_id(
 ) -> str:
     identity = "|".join(
         [
-            identity_key or normalize_context_key(course.context_key) or normalized_course_name_key(course.name) or course.id,
+            identity_key or academic_context_key(course) or normalized_course_name_key(course.name) or course.id,
             str(course.workload_hours),
             str(theoretical_hours),
             str(practical_hours),
@@ -1683,9 +1809,14 @@ def merge_requested_time_windows(
     )
 
 
-def official_schedule_for_group(group: list[Course]) -> tuple[tuple[int, int, int], ...]:
-    schedule: set[tuple[int, int, int]] = set()
+def official_schedule_for_group(
+    group: list[Course],
+    *,
+    demand_driven: bool,
+) -> tuple[tuple[int, int, int], ...]:
+    schedules: list[tuple[tuple[int, int, int], ...]] = []
     for course in group:
+        schedule: set[tuple[int, int, int]] = set()
         for item in course.official_schedule or []:
             try:
                 day = int(item["day"])
@@ -1694,7 +1825,16 @@ def official_schedule_for_group(group: list[Course]) -> tuple[tuple[int, int, in
             except (KeyError, TypeError, ValueError):
                 continue
             schedule.add((day, start, end))
-    return tuple(sorted(schedule))
+        if schedule:
+            schedules.append(tuple(sorted(schedule)))
+    if not schedules:
+        return ()
+    if not demand_driven:
+        return tuple(sorted({window for schedule in schedules for window in schedule}))
+    if len(group) == 1:
+        return schedules[0]
+    unique_schedules = set(schedules)
+    return next(iter(unique_schedules)) if len(unique_schedules) == 1 else ()
 
 
 def is_regular_curriculum_course(course: Course) -> bool:

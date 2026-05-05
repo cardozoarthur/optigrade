@@ -213,12 +213,16 @@ export type OptimizationMetrics = Record<string, unknown> & {
   min_load_warnings?: number;
   student_demand_requests?: number;
   elapsed_ms?: number;
+  optimization_status?: string;
+  post_processing?: string | null;
   enrollment_round?: EnrollmentRoundSummary;
   planned_sections?: unknown[];
   student_demand_plan?: {
     alternative_assignments?: number;
     unplanned_choice_groups?: number;
+    unplanned_request_count?: number;
   } & Record<string, unknown>;
+  hard_diagnostics?: Array<Record<string, unknown>>;
 };
 
 export type ParetoSolution = Record<string, unknown> & {
