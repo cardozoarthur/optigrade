@@ -129,8 +129,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
     const fresh = await publicPresentationApi<OptimizationRun>(`/optimization/runs/${targetRunId}`);
     runRef.current = fresh;
     setRun(fresh);
-    const optimizationFinished = Boolean(fresh.metrics?.optimization_status);
-    if (fresh.status === "feasible" || fresh.status === "infeasible" || fresh.status === "failed" || optimizationFinished) {
+    if (fresh.status === "feasible" || fresh.status === "infeasible" || fresh.status === "failed") {
       setAssignments(await publicPresentationApi<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`));
     }
   }, []);

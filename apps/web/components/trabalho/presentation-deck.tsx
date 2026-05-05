@@ -453,8 +453,7 @@ function ResultSlide() {
   const { run, assignments, optimizationStartedAt, optimizationError, startOptimization, refreshOptimization } = usePresentation();
   const [elapsed, setElapsed] = useState(0);
   const [catalog, setCatalog] = useState<CalendarCatalog | null>(null);
-  const optimizationFinished = Boolean(run?.metrics?.optimization_status);
-  const running = !run || ((run.status === "pending" || run.status === "running") && !optimizationFinished);
+  const running = !run || run.status === "pending" || run.status === "running";
   const runId = run?.id;
   const runStatus = run?.status;
 
