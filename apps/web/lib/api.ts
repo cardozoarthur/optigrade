@@ -172,6 +172,10 @@ export type EnrollmentRoundSummary = {
     remaining: number;
     remaining_request_ids?: string[];
   };
+  rescue_enrolled?: number;
+  rescue_displaced_allocations?: Array<Record<string, unknown>>;
+  students_without_enrollment_before_rescue?: number;
+  students_without_enrollment_after_rescue?: number;
 };
 
 export type Professor = {
@@ -210,6 +214,7 @@ export type OptimizationRun = {
   status: "pending" | "running" | "feasible" | "infeasible" | "failed";
   semester: string;
   profile: string;
+  parameters: Record<string, unknown>;
   metrics: OptimizationMetrics;
   pareto_front: ParetoSolution[];
   explanation: string | null;

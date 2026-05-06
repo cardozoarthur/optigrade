@@ -124,6 +124,60 @@ def test_get_run_requeues_pending_run(monkeypatch, db_session) -> None:
     assert enqueued == [existing.id]
 
 
+def test_get_run_requeues_finished_optimizer_waiting_for_auto_enrollment(
+    monkeypatch,
+    db_session,
+) -> None:
+    enqueued: list[str] = []
+    existing = OptimizationRun(
+        semester="2026/2",
+        profile="balanced",
+        parameters={"student_demand_only": True, "auto_enrollment": True},
+        status=RunStatus.running,
+        finished_at=datetime.now(timezone.utc),
+        metrics={
+            "optimization_status": "feasible",
+            "post_processing": "automatic_enrollment",
+            "student_demand_requests": 10,
+        },
+    )
+    db_session.add(existing)
+    db_session.commit()
+    monkeypatch.setattr(optimization, "enqueue_optimization_run", lambda run_id: enqueued.append(run_id))
+
+    run = optimization.get_run(existing.id, db_session)
+
+    assert run.id == existing.id
+    assert enqueued == [existing.id]
+
+
+def test_list_runs_requeues_finished_optimizer_waiting_for_auto_enrollment(
+    monkeypatch,
+    db_session,
+) -> None:
+    enqueued: list[str] = []
+    existing = OptimizationRun(
+        semester="2026/2",
+        profile="balanced",
+        parameters={"student_demand_only": True, "auto_enrollment": True},
+        status=RunStatus.running,
+        finished_at=datetime.now(timezone.utc),
+        metrics={
+            "optimization_status": "feasible",
+            "post_processing": "automatic_enrollment",
+            "student_demand_requests": 10,
+        },
+    )
+    db_session.add(existing)
+    db_session.commit()
+    monkeypatch.setattr(optimization, "enqueue_optimization_run", lambda run_id: enqueued.append(run_id))
+
+    runs = optimization.list_runs(db_session)
+
+    assert runs[0].id == existing.id
+    assert enqueued == [existing.id]
+
+
 def test_reoptimize_returns_new_pending_run(monkeypatch, db_session) -> None:
     enqueued: list[str] = []
     previous = OptimizationRun(

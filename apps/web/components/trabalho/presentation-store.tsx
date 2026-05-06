@@ -135,12 +135,11 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
     runRef.current = fresh;
     setRun(fresh);
     if (fresh.status === "feasible" || fresh.status === "infeasible" || fresh.status === "failed") {
-      const [nextAssignments, nextDetails] = await Promise.all([
-        publicPresentationApi<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`),
-        publicPresentationApi<AssignmentDetailsResponse>(`/optimization/runs/${fresh.id}/details`)
-      ]);
+      const nextAssignments = await publicPresentationApi<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`);
       setAssignments(nextAssignments);
-      setAssignmentDetails(nextDetails.assignments);
+      void publicPresentationApi<AssignmentDetailsResponse>(`/optimization/runs/${fresh.id}/details`)
+        .then((nextDetails) => setAssignmentDetails(nextDetails.assignments))
+        .catch(console.error);
     }
   }, []);
 

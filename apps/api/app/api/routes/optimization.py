@@ -31,7 +31,11 @@ from app.schemas import (
     OptimizationRunRead,
 )
 from app.services.enrollment import enrollment_bucket_key
-from app.services.optimization_jobs import enqueue_optimization_run, find_active_run
+from app.services.optimization_jobs import (
+    enqueue_optimization_run,
+    find_active_run,
+    needs_automatic_enrollment_resume,
+)
 from app.services.optimizer import validate_manual_assignments
 
 router = APIRouter()
@@ -39,7 +43,11 @@ router = APIRouter()
 
 @router.get("/runs", response_model=list[OptimizationRunRead])
 def list_runs(db: Session = Depends(get_db)) -> list[OptimizationRun]:
-    return db.query(OptimizationRun).order_by(OptimizationRun.created_at.desc()).limit(25).all()
+    runs = db.query(OptimizationRun).order_by(OptimizationRun.created_at.desc()).limit(25).all()
+    for run in runs:
+        if needs_automatic_enrollment_resume(run):
+            enqueue_optimization_run(run.id)
+    return runs
 
 
 @router.post("/runs", response_model=OptimizationRunRead)
@@ -71,7 +79,7 @@ def get_run(run_id: str, db: Session = Depends(get_db)) -> OptimizationRun:
     run = db.get(OptimizationRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Execucao nao encontrada")
-    if run.status == RunStatus.pending:
+    if run.status == RunStatus.pending or needs_automatic_enrollment_resume(run):
         enqueue_optimization_run(run.id)
     return run
 

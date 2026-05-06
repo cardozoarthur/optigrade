@@ -29,6 +29,7 @@ def enqueue_optimization_run(run_id: str) -> None:
 
 
 def recover_optimization_jobs() -> None:
+    resumable_post_processing: list[str] = []
     with SessionLocal() as db:
         interrupted = (
             db.query(OptimizationRun)
@@ -36,6 +37,9 @@ def recover_optimization_jobs() -> None:
             .all()
         )
         for run in interrupted:
+            if needs_automatic_enrollment_resume(run):
+                resumable_post_processing.append(run.id)
+                continue
             run.status = RunStatus.failed
             run.finished_at = datetime.now(timezone.utc)
             run.explanation = "Execucao interrompida por reinicio da API."
@@ -47,8 +51,8 @@ def recover_optimization_jobs() -> None:
         )
         db.commit()
 
-    for run in pending:
-        enqueue_optimization_run(run.id)
+    for run_id in [*resumable_post_processing, *(run.id for run in pending)]:
+        enqueue_optimization_run(run_id)
 
 
 def find_active_run(
@@ -85,6 +89,9 @@ def _run_optimization_job(run_id: str) -> None:
         with SessionLocal() as db:
             run = db.get(OptimizationRun, run_id)
             if not run or run.status in FINAL_STATUSES:
+                return
+            if needs_automatic_enrollment_resume(run):
+                _maybe_run_automatic_enrollment(db, run)
                 return
             result = run_optimization(db, run)
             _maybe_run_automatic_enrollment(db, result)
@@ -125,3 +132,13 @@ def _maybe_run_automatic_enrollment(db: Session, run: OptimizationRun) -> None:
     run.status = RunStatus(optimization_status)
     run.metrics = run.metrics | {"enrollment_round": summary, "post_processing": None}
     db.commit()
+
+
+def needs_automatic_enrollment_resume(run: OptimizationRun) -> bool:
+    metrics = run.metrics or {}
+    return (
+        run.status == RunStatus.running
+        and run.finished_at is not None
+        and metrics.get("post_processing") == "automatic_enrollment"
+        and not isinstance(metrics.get("enrollment_round"), dict)
+    )

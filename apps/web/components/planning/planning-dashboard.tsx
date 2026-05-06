@@ -73,7 +73,7 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const latestRun = state.runs[0];
+  const latestRun = useMemo(() => preferredAdminRun(state.runs), [state.runs]);
   const courseById = useMemo(() => indexBy(state.courses), [state.courses]);
   const professorById = useMemo(() => indexBy(state.professors), [state.professors]);
   const roomById = useMemo(() => indexBy(state.rooms), [state.rooms]);
@@ -83,6 +83,10 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
   const contextCount = new Set(state.courses.map((item) => item.context_key).filter(Boolean)).size;
   const enrollmentRound = latestRun?.metrics?.enrollment_round as EnrollmentRoundSummary | undefined;
   const demandRequests = Number(latestRun?.metrics?.student_demand_requests ?? 0);
+  const studentsWithoutEnrollment = enrollmentRound
+    ? enrollmentRound.students_without_enrollment_after_rescue ?? enrollmentRound.unallocated_groups
+    : 0;
+  const unsatisfiedChoiceGroups = enrollmentRound?.unallocated_groups ?? 0;
   const runInProgress = latestRun ? isRunInProgress(latestRun) : false;
   const processing = busy || runInProgress;
 
@@ -100,10 +104,11 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
       api<TimeSlot[]>("/timeslots"),
       api<OptimizationRun[]>("/optimization/runs")
     ]);
+    const nextRun = preferredAdminRun(runs);
     setState({ campuses, degreePrograms, courses, courseRestrictions, students, professors, rooms, slots, runs });
-    if (runs[0] && isRunFinal(runs[0])) {
-      setAssignments(await api<Assignment[]>(`/optimization/runs/${runs[0].id}/assignments`));
-    } else if (runs[0]) {
+    if (nextRun && isRunFinal(nextRun)) {
+      setAssignments(await api<Assignment[]>(`/optimization/runs/${nextRun.id}/assignments`));
+    } else if (nextRun) {
       setAssignments([]);
     }
   }
@@ -132,7 +137,8 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
           parameters: {
             student_demand_only: profile !== "official_ufpel",
             auto_enrollment: true,
-            enrollment_stage: "pre_enrollment"
+            enrollment_stage: "pre_enrollment",
+            source: "admin"
           }
         })
       });
@@ -196,6 +202,7 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
           <Metric icon={BrainCircuit} label="Score" value={latestRun?.score ?? "-"} />
           <Metric icon={Database} label="Cobertura útil" value={formatPercent(latestRun?.metrics?.coverage)} />
           <Metric icon={CheckCircle2} label="Matriculados" value={enrollmentRound?.enrolled ?? "-"} />
+          <Metric icon={AlertTriangle} label="Sem matrícula" value={enrollmentRound ? studentsWithoutEnrollment : "-"} />
           <Metric icon={AlertTriangle} label="Carga mín." value={latestRun?.metrics?.min_load_warnings ?? "-"} />
           <Metric icon={BookOpen} label="Contextos" value={contextCount} />
           <Metric icon={GraduationCap} label="Alunos" value={state.students.length} />
@@ -208,7 +215,11 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <h2 className="text-base font-semibold">Gerador</h2>
-                <p className="text-sm text-slate-600">{latestRun?.explanation ?? "Nenhuma grade gerada"}</p>
+                <p className="text-sm text-slate-600">
+                  {latestRun
+                    ? `${latestRun.explanation ?? "Grade em processamento"} · origem ${runSourceLabel(latestRun)}`
+                    : "Nenhuma grade gerada"}
+                </p>
               </div>
               <CalendarDays size={20} className="text-lake" />
             </div>
@@ -242,6 +253,8 @@ export default function PlanningDashboard({ embedded = false }: { embedded?: boo
                 latestRun={latestRun}
                 enrollmentRound={enrollmentRound}
                 demandRequests={demandRequests}
+                studentsWithoutEnrollment={studentsWithoutEnrollment}
+                unsatisfiedChoiceGroups={unsatisfiedChoiceGroups}
               />
               <div className="grid gap-2">
                 {(latestRun?.pareto_front ?? []).slice(0, 4).map((item) => (
@@ -320,12 +333,16 @@ function AutomaticEnrollmentCard({
   busy,
   latestRun,
   enrollmentRound,
-  demandRequests
+  demandRequests,
+  studentsWithoutEnrollment,
+  unsatisfiedChoiceGroups
 }: {
   busy: boolean;
   latestRun?: OptimizationRun;
   enrollmentRound?: EnrollmentRoundSummary;
   demandRequests: number;
+  studentsWithoutEnrollment: number;
+  unsatisfiedChoiceGroups: number;
 }) {
   const ready = Boolean(enrollmentRound);
   const Icon = busy ? Hourglass : ready ? CheckCircle2 : demandRequests > 0 ? AlertTriangle : CalendarDays;
@@ -358,11 +375,12 @@ function AutomaticEnrollmentCard({
           <p className="mt-1 text-xs leading-relaxed text-slate-600">{subtitle}</p>
         </div>
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
         <RoundStat label="Alocados" value={enrollmentRound?.enrolled ?? 0} />
         <RoundStat label="Em espera" value={enrollmentRound?.waitlisted ?? 0} tone={enrollmentRound?.waitlisted ? "warning" : "default"} />
         <RoundStat label="Bloqueados" value={enrollmentRound?.blocked ?? 0} tone={enrollmentRound?.blocked ? "warning" : "default"} />
-        <RoundStat label="Sem vaga" value={enrollmentRound?.unallocated_groups ?? 0} tone={enrollmentRound?.unallocated_groups ? "warning" : "default"} />
+        <RoundStat label="Sem matrícula" value={enrollmentRound ? studentsWithoutEnrollment : 0} tone={studentsWithoutEnrollment ? "warning" : "default"} />
+        <RoundStat label="Alternativas pend." value={enrollmentRound ? unsatisfiedChoiceGroups : 0} tone={unsatisfiedChoiceGroups ? "warning" : "default"} />
       </div>
     </motion.div>
   );
@@ -1317,6 +1335,17 @@ function isRunInProgress(run: OptimizationRun) {
 
 function isRunFinal(run: OptimizationRun) {
   return run.status === "feasible" || run.status === "infeasible" || run.status === "failed";
+}
+
+function runSourceLabel(run: OptimizationRun) {
+  const source = run.parameters?.source;
+  if (source === "trabalho") return "apresentação";
+  if (typeof source === "string" && source.trim()) return source;
+  return "admin";
+}
+
+function preferredAdminRun(runs: OptimizationRun[]) {
+  return runs.find((run) => run.parameters?.source !== "trabalho") ?? runs[0];
 }
 
 function toMinutes(value: string) {

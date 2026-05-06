@@ -689,8 +689,14 @@ function ResultSlide() {
     metricNumber(run.metrics?.student_demand_plan?.unplanned_request_count) ??
     metricNumber(run.metrics?.student_demand_plan?.unplanned_choice_groups);
   const unplannedAfterEnrollment = run.metrics?.enrollment_round?.unplanned_after_enrollment;
+  const enrollmentRound = run.metrics?.enrollment_round;
+  const studentsWithoutEnrollment = metricNumber(enrollmentRound?.students_without_enrollment_after_rescue);
+  const unsatisfiedChoiceGroups = metricNumber(enrollmentRound?.unallocated_groups);
   const finalUnplannedDemandRequests = metricNumber(unplannedAfterEnrollment?.remaining);
-  const unplannedDemandRequests = finalUnplannedDemandRequests ?? rawUnplannedDemandRequests;
+  const unplannedDemandRequests = Math.max(
+    studentsWithoutEnrollment ?? 0,
+    finalUnplannedDemandRequests ?? rawUnplannedDemandRequests ?? 0
+  );
   const enrolledUnplannedDemandRequests = metricNumber(unplannedAfterEnrollment?.enrolled);
   const sectionsBelowMinimum = sectionPlans.filter(
     (section) => section.planned_students > 0 && section.planned_students < 3
@@ -720,6 +726,11 @@ function ResultSlide() {
         <MetricTile label="Turmas abertas" value={String(sectionPlans.length || "-")} />
         <MetricTile label="Alternativas usadas" value={String(run.metrics?.student_demand_plan?.alternative_assignments ?? "-")} />
         <MetricTile
+          label="Alternativas não atendidas"
+          value={String(unsatisfiedChoiceGroups ?? "-")}
+          tone={unsatisfiedChoiceGroups ? "amber" : "green"}
+        />
+        <MetricTile
           label="Demandas pendentes"
           value={String(unplannedDemandRequests ?? "-")}
           tone={unplannedDemandRequests ? "amber" : "green"}
@@ -733,6 +744,7 @@ function ResultSlide() {
         unplannedDemandRequests={unplannedDemandRequests ?? 0}
         rawUnplannedDemandRequests={rawUnplannedDemandRequests ?? 0}
         enrolledUnplannedDemandRequests={enrolledUnplannedDemandRequests ?? 0}
+        unsatisfiedChoiceGroups={unsatisfiedChoiceGroups ?? 0}
       />
       <CalendarPreview
         assignments={assignments}
@@ -997,15 +1009,21 @@ function ResultDiagnostics({
   sectionIssues,
   unplannedDemandRequests,
   rawUnplannedDemandRequests,
-  enrolledUnplannedDemandRequests
+  enrolledUnplannedDemandRequests,
+  unsatisfiedChoiceGroups
 }: {
   hardDiagnostics: HardDiagnostic[];
   sectionIssues: PlannedSection[];
   unplannedDemandRequests: number;
   rawUnplannedDemandRequests: number;
   enrolledUnplannedDemandRequests: number;
+  unsatisfiedChoiceGroups: number;
 }) {
-  const hasProblems = hardDiagnostics.length > 0 || sectionIssues.length > 0 || unplannedDemandRequests > 0;
+  const hasProblems =
+    hardDiagnostics.length > 0 ||
+    sectionIssues.length > 0 ||
+    unplannedDemandRequests > 0 ||
+    unsatisfiedChoiceGroups > 0;
   if (!hasProblems) {
     return (
       <Panel className="border-moss/30 bg-moss/10">
@@ -1014,7 +1032,7 @@ function ResultDiagnostics({
           <div>
             <h2 className="text-lg font-semibold">Sem pendências operacionais no resultado</h2>
             <p className="text-sm text-slate-700">
-              A rodada não retornou conflitos hard, sobras de demanda ou turmas abaixo do mínimo planejado.
+              A rodada não retornou conflitos hard, alunos sem matrícula, alternativas pendentes ou turmas abaixo do mínimo planejado.
             </p>
             {rawUnplannedDemandRequests > 0 && enrolledUnplannedDemandRequests > 0 ? (
               <p className="mt-1 text-sm text-slate-700">
@@ -1037,7 +1055,8 @@ function ResultDiagnostics({
             <h2 className="text-lg font-semibold">Pendências para correção da rodada</h2>
             <p className="text-sm text-slate-700">
               “Demandas pendentes” considera apenas pedidos que seguiram sem matrícula depois da etapa final de
-              alocação. “Turmas abaixo do mínimo” só conta turmas abertas com menos de 3 inscritos.
+              alocação. “Alternativas não atendidas” mostra grupos de preferência que o solver descartou porque outra
+              opção teve melhor encaixe global.
             </p>
           </div>
         </div>
@@ -1075,10 +1094,19 @@ function ResultDiagnostics({
             </div>
           </div>
         ) : null}
-        {sectionIssues.length || unplannedDemandRequests > 0 ? (
+        {sectionIssues.length || unplannedDemandRequests > 0 || unsatisfiedChoiceGroups > 0 ? (
           <div className="rounded-md border border-white/80 bg-white p-3">
             <h3 className="text-sm font-semibold uppercase text-slate-600">Demanda e turmas</h3>
             <div className="mt-2 grid gap-2 text-xs">
+              {unsatisfiedChoiceGroups > 0 ? (
+                <div className="rounded-md border border-slateLine px-3 py-2">
+                  <div className="font-semibold text-ink">{unsatisfiedChoiceGroups} grupos de preferência não foram atendidos</div>
+                  <div className="mt-1 text-slate-600">
+                    Isso não significa necessariamente aluno sem semestre; significa que o solver escolheu outra
+                    alternativa ou priorizou uma solução institucionalmente melhor.
+                  </div>
+                </div>
+              ) : null}
               {unplannedDemandRequests > 0 ? (
                 <div className="rounded-md border border-slateLine px-3 py-2">
                   <div className="font-semibold text-ink">{unplannedDemandRequests} pedidos seguem sem atendimento</div>
