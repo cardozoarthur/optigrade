@@ -11,18 +11,24 @@ import {
   BookOpen,
   CalendarDays,
   CheckCircle2,
+  ClipboardList,
   Cpu,
   Database,
   ExternalLink,
   Github,
   GraduationCap,
+  Info,
   Loader2,
   Play,
   School,
-  Users
+  UserRoundCog,
+  Users,
+  X
 } from "lucide-react";
 import {
   Assignment,
+  AssignmentDetail,
+  AssignmentEnrollmentDetail,
   Campus,
   Course,
   OptimizationRun,
@@ -362,7 +368,7 @@ function TeacherSlide({ onNext }: { onNext: () => void }) {
   return (
     <QrSlide
       title="Professor: registrar preferências e restrições complexas"
-      subtitle="O QR Code fica válido apenas enquanto este slide estiver ativo."
+      subtitle="O QR Code abre um magic link diretamente no perfil da professora STEFFANI NIKOLI DAPPER e fica válido apenas enquanto este slide estiver ativo."
       link={teacherLink?.url}
       video="/trabalho/videos/professor-preferencias.mp4"
       onNext={onNext}
@@ -600,7 +606,15 @@ function OptimizationFlowSlide({ onNext }: { onNext: () => void }) {
 
 function ResultSlide() {
   const searchParams = useSearchParams();
-  const { run, assignments, optimizationStartedAt, optimizationError, startOptimization, refreshOptimization } = usePresentation();
+  const {
+    run,
+    assignments,
+    assignmentDetails,
+    optimizationStartedAt,
+    optimizationError,
+    startOptimization,
+    refreshOptimization
+  } = usePresentation();
   const [elapsed, setElapsed] = useState(0);
   const [catalog, setCatalog] = useState<CalendarCatalog | null>(null);
   const running = !run || run.status === "pending" || run.status === "running";
@@ -720,7 +734,12 @@ function ResultSlide() {
         rawUnplannedDemandRequests={rawUnplannedDemandRequests ?? 0}
         enrolledUnplannedDemandRequests={enrolledUnplannedDemandRequests ?? 0}
       />
-      <CalendarPreview assignments={assignments} catalog={catalog} sectionPlans={sectionPlans} />
+      <CalendarPreview
+        assignments={assignments}
+        assignmentDetails={assignmentDetails}
+        catalog={catalog}
+        sectionPlans={sectionPlans}
+      />
     </section>
   );
 }
@@ -1089,17 +1108,24 @@ function ResultDiagnostics({
 
 function CalendarPreview({
   assignments,
+  assignmentDetails,
   catalog,
   sectionPlans
 }: {
   assignments: Assignment[];
+  assignmentDetails: AssignmentDetail[];
   catalog: CalendarCatalog | null;
   sectionPlans: PlannedSection[];
 }) {
+  const [selectedDetail, setSelectedDetail] = useState<AssignmentDetail | null>(null);
   const courseById = useMemo(() => indexBy(catalog?.courses ?? []), [catalog?.courses]);
   const professorById = useMemo(() => indexBy(catalog?.professors ?? []), [catalog?.professors]);
   const roomById = useMemo(() => indexBy(catalog?.rooms ?? []), [catalog?.rooms]);
   const campusById = useMemo(() => indexBy(catalog?.campuses ?? []), [catalog?.campuses]);
+  const detailByAssignmentId = useMemo(
+    () => indexBy(assignmentDetails.map((detail) => ({ ...detail, id: detail.assignment.id }))),
+    [assignmentDetails]
+  );
   const sectionByKey = useMemo(
     () =>
       Object.fromEntries(
@@ -1144,12 +1170,20 @@ function CalendarPreview({
                     const courseTitle = sectionPlan?.course_name ?? course?.name ?? assignment.course_id;
                     const coursePeriod = sectionPlan ? coursePeriodLabel(sectionPlan) : null;
                     const workload = sectionPlan?.workload_hours ?? course?.workload_hours;
+                    const detail = detailByAssignmentId[assignment.id];
+                    const enrolledCount = detail?.enrollments.length ?? sectionPlan?.planned_students ?? 0;
                     return (
-                      <div key={assignment.id} className="rounded-md border border-lake/20 bg-white px-3 py-2 text-[11px]">
+                      <button
+                        key={assignment.id}
+                        type="button"
+                        onClick={() => detail && setSelectedDetail(detail)}
+                        disabled={!detail}
+                        className="focus-ring group rounded-md border border-lake/20 bg-white px-3 py-2 text-left text-[11px] transition hover:-translate-y-0.5 hover:border-lake hover:shadow-panel disabled:cursor-default disabled:hover:translate-y-0 disabled:hover:border-lake/20 disabled:hover:shadow-none"
+                      >
                         <div className="font-semibold text-ink">{courseTitle}</div>
                         <div className="mt-1 font-medium text-lake">
                           {sectionPlan
-                            ? `${sectionPlan.section_label} · ${sectionPlan.planned_students} inscritos`
+                            ? `${sectionPlan.section_label} · ${enrolledCount} inscritos`
                             : `Turma ${sectionIndex + 1}`}
                         </div>
                         <div className="mt-1 text-slate-600">
@@ -1167,7 +1201,10 @@ function CalendarPreview({
                           {room ? ` · ${room.capacity} vagas físicas` : ""}
                           {campus ? ` · ${campus.name}` : ""}
                         </div>
-                      </div>
+                        <div className="mt-2 inline-flex items-center gap-1 font-semibold text-lake opacity-80 transition group-hover:opacity-100">
+                          <Info size={12} /> Ver detalhes
+                        </div>
+                      </button>
                     );
                   })
                 ) : (
@@ -1185,8 +1222,403 @@ function CalendarPreview({
           </div>
         ) : null}
       </div>
+      <AssignmentDetailModal detail={selectedDetail} onClose={() => setSelectedDetail(null)} />
     </Panel>
   );
+}
+
+function AssignmentDetailModal({
+  detail,
+  onClose
+}: {
+  detail: AssignmentDetail | null;
+  onClose: () => void;
+}) {
+  const [activeTab, setActiveTab] = useState("inscricoes");
+
+  useEffect(() => {
+    if (detail) setActiveTab("inscricoes");
+  }, [detail?.assignment.id, detail]);
+
+  useEffect(() => {
+    if (!detail) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [detail, onClose]);
+
+  if (!detail) return null;
+
+  const tabItems = [
+    { id: "inscricoes", label: "Inscrições", icon: ClipboardList },
+    { id: "turma", label: "Turma", icon: CalendarDays },
+    { id: "professor", label: "Professor", icon: UserRoundCog },
+    { id: "solver", label: "Solver", icon: Cpu }
+  ];
+  const courseName = detail.section?.course_name ?? detail.course?.name ?? detail.assignment.course_id;
+  const slot = detail.slot;
+  const room = detail.room;
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-0 z-50 grid place-items-center bg-ink/45 p-3 backdrop-blur-sm sm:p-5"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+      >
+        <motion.div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Detalhes de ${courseName}`}
+          initial={{ opacity: 0, y: 18, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 12, scale: 0.98 }}
+          transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+          className="grid max-h-[92vh] min-w-0 w-full max-w-5xl grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_1fr] overflow-hidden rounded-lg border border-slateLine bg-white shadow-2xl"
+        >
+          <div className="flex items-start justify-between gap-3 border-b border-slateLine px-4 py-4 sm:px-5">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase text-lake">Detalhe da oferta</p>
+              <h2 className="mt-1 truncate text-xl font-semibold sm:text-2xl">{courseName}</h2>
+              <p className="mt-1 text-sm text-slate-600">
+                {detail.section?.section_label ?? `Turma ${(detail.assignment.section_index ?? 0) + 1}`}
+                {slot ? ` · ${dayLabels[slot.day]} ${minutesToLabel(slot.start_minute)}-${minutesToLabel(slot.end_minute)}` : ""}
+                {room ? ` · ${room.name}` : ""}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="focus-ring grid h-10 w-10 shrink-0 place-items-center rounded-md border border-slateLine bg-white transition hover:-translate-y-0.5 hover:border-lake hover:text-lake"
+              aria-label="Fechar detalhes"
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          <div className="min-w-0 w-full max-w-full overflow-hidden border-b border-slateLine bg-slate-50 px-3 py-2">
+            <div className="flex min-w-0 w-full max-w-full gap-2 overflow-x-auto pb-1 [scrollbar-gutter:stable]">
+              {tabItems.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`focus-ring inline-flex h-10 shrink-0 items-center gap-2 rounded-md border px-3 text-sm font-semibold transition ${
+                    activeTab === tab.id
+                      ? "border-lake bg-white text-lake shadow-panel"
+                      : "border-transparent bg-transparent text-slate-600 hover:bg-white hover:text-ink"
+                  }`}
+                >
+                  <tab.icon size={16} />
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="min-w-0 overflow-y-auto p-4 sm:p-5">
+            {activeTab === "inscricoes" ? <EnrollmentTab detail={detail} /> : null}
+            {activeTab === "turma" ? <ClassTab detail={detail} /> : null}
+            {activeTab === "professor" ? <ProfessorTab detail={detail} /> : null}
+            {activeTab === "solver" ? <SolverTab detail={detail} /> : null}
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
+function EnrollmentTab({ detail }: { detail: AssignmentDetail }) {
+  const enrollments = detail.enrollments;
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <MetricTile label="Inscritos vinculados" value={String(enrollments.length)} tone={enrollments.length ? "green" : "amber"} />
+        <MetricTile label="Capacidade física" value={String(detail.room?.capacity ?? "-")} />
+        <MetricTile label="Demanda planejada" value={String(detail.section?.planned_students ?? "-")} />
+      </div>
+      {enrollments.length ? (
+        <div className="grid gap-3">
+          {enrollments.map((enrollment) => (
+            <EnrollmentDetailCard key={enrollment.id} enrollment={enrollment} />
+          ))}
+        </div>
+      ) : (
+        <DetailBlock title="Sem inscrições atribuídas">
+          <p className="text-sm leading-relaxed text-slate-700">
+            A oferta existe, mas o detalhe público do run não encontrou alunos matriculados nesta turma.
+          </p>
+        </DetailBlock>
+      )}
+    </div>
+  );
+}
+
+function EnrollmentDetailCard({ enrollment }: { enrollment: AssignmentEnrollmentDetail }) {
+  const request = enrollment.request;
+  return (
+    <div className="rounded-md border border-slateLine bg-slate-50 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 className="text-base font-semibold">{enrollment.student.name}</h3>
+          <p className="mt-1 text-sm text-slate-600">
+            {enrollment.student.degree_program_name ?? "Curso de origem não informado"}
+            {enrollment.student.current_semester ? ` · ${enrollment.student.current_semester}º semestre` : ""}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Tag>{enrollment.decision_type}</Tag>
+          <Tag>{enrollment.status}</Tag>
+          <Tag>{enrollment.score.toLocaleString("pt-BR", { maximumFractionDigits: 1 })} pts</Tag>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+        <DetailBlock title="Origem da escolha">
+          <DetailKeyValue label="Cadeira solicitada" value={enrollment.requested_course?.name ?? "-"} />
+          <DetailKeyValue label="Cadeira ofertada" value={enrollment.assigned_course?.name ?? "-"} />
+          <DetailKeyValue label="Posição na fila" value={request ? String(request.preference_order) : "-"} />
+          <DetailKeyValue label="Prioridade" value={request ? String(request.priority) : "-"} />
+          <DetailKeyValue label="Grupo de alternativa" value={request?.alternative_group ?? "-"} />
+          {request?.desired_day !== null && request?.desired_day !== undefined ? (
+            <DetailKeyValue
+              label="Janela desejada"
+              value={`${dayLabels[request.desired_day]} ${formatOptionalWindow(request.desired_start_minute, request.desired_end_minute)}`}
+            />
+          ) : null}
+        </DetailBlock>
+        <DetailBlock title="Por que caiu nesta turma">
+          <ReasonList items={enrollment.why_this_section} />
+        </DetailBlock>
+      </div>
+      <div className="mt-3">
+        <DetailBlock title="Pontuação da vaga">
+          <ScoreBreakdown values={enrollment.score_breakdown} />
+        </DetailBlock>
+      </div>
+    </div>
+  );
+}
+
+function ClassTab({ detail }: { detail: AssignmentDetail }) {
+  const slot = detail.slot;
+  const coursePeriod = detail.section ? coursePeriodLabel(detail.section as PlannedSection) : detail.course?.official_period;
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <DetailBlock title="Oferta">
+        <DetailKeyValue label="Cadeira" value={detail.section?.course_name ?? detail.course?.name ?? "-"} />
+        <DetailKeyValue label="Código" value={detail.course?.code ?? "-"} />
+        <DetailKeyValue label="Curso de origem" value={detail.course?.degree_program_name ?? "-"} />
+        <DetailKeyValue label="Período do curso" value={coursePeriod ? turnLabel(coursePeriod) : "-"} />
+        <DetailKeyValue label="Carga total" value={detail.course?.workload_hours ? `${detail.course.workload_hours}h` : "-"} />
+        <DetailKeyValue label="Horas teóricas" value={detail.course?.theoretical_hours ? `${detail.course.theoretical_hours}h` : "-"} />
+        <DetailKeyValue label="Contexto" value={detail.course?.context_key ?? "-"} />
+        <DetailKeyValue label="Compartilhável" value={detail.course?.shareable ? "sim" : "não"} />
+      </DetailBlock>
+      <DetailBlock title="Sala e horário">
+        <DetailKeyValue label="Horário" value={slot ? `${dayLabels[slot.day]} ${minutesToLabel(slot.start_minute)}-${minutesToLabel(slot.end_minute)}` : "-"} />
+        <DetailKeyValue label="Turno da oferta" value={slot ? turnLabel(turnKeyForWindow(slot.start_minute, slot.end_minute)) : "-"} />
+        <DetailKeyValue label="Sala" value={detail.room?.name ?? "-"} />
+        <DetailKeyValue label="Campus" value={detail.room?.campus_name ?? detail.course?.campus_name ?? "-"} />
+        <DetailKeyValue label="Capacidade" value={detail.room ? `${detail.room.capacity} vagas` : "-"} />
+        <DetailKeyValue label="Tipo" value={detail.room?.kind === "lab" ? "laboratório" : "teórica"} />
+      </DetailBlock>
+      <DetailBlock title="Decisão da turma">
+        <DetailKeyValue label="Turma" value={detail.section?.section_label ?? `Turma ${(detail.assignment.section_index ?? 0) + 1}`} />
+        <DetailKeyValue label="Inscritos planejados" value={String(detail.section?.planned_students ?? detail.enrollments.length)} />
+        <DetailKeyValue label="Estratégia" value={typeof detail.section?.strategy === "string" ? detail.section.strategy : "-"} />
+        <DetailKeyValue label="Origem da alocação" value={detail.assignment.origin} />
+      </DetailBlock>
+      <DetailBlock title="Justificativa de sala e horário">
+        <ReasonList items={detail.decision.why_time_room} />
+      </DetailBlock>
+    </div>
+  );
+}
+
+function ProfessorTab({ detail }: { detail: AssignmentDetail }) {
+  const professor = detail.professor;
+  if (!professor) {
+    return <DetailBlock title="Professor não encontrado">Dados docentes indisponíveis para esta oferta.</DetailBlock>;
+  }
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <DetailBlock title="Docente designado">
+        <DetailKeyValue label="Nome" value={professor.name} />
+        <DetailKeyValue label="Departamento" value={professor.department ?? "-"} />
+        <DetailKeyValue label="E-mail" value={professor.email ?? "-"} />
+        <DetailKeyValue label="Regime" value={professor.contract?.regime ?? "-"} />
+        <DetailKeyValue label="Carga mínima" value={professor.contract ? `${professor.contract.min_hours}h` : "-"} />
+        <DetailKeyValue label="Carga máxima" value={professor.contract ? `${professor.contract.max_hours}h` : "-"} />
+        <DetailKeyValue label="Emprestado" value={professor.contract?.is_borrowed ? "sim" : "não"} />
+      </DetailBlock>
+      <DetailBlock title="Por que este professor">
+        <ReasonList items={detail.decision.why_professor} />
+      </DetailBlock>
+      <DetailBlock title="Disponibilidade cadastrada">
+        <div className="grid max-h-72 gap-2 overflow-y-auto pr-1">
+          {professor.availability.length ? (
+            professor.availability.map((item, index) => (
+              <div
+                key={`${item.day}-${item.start_minute}-${item.end_minute}-${index}`}
+                className={`rounded-md border px-3 py-2 text-sm ${
+                  item.matches_assignment ? "border-moss/40 bg-moss/10" : "border-slateLine bg-white"
+                }`}
+              >
+                <div className="font-semibold">
+                  {dayLabels[item.day]} {minutesToLabel(item.start_minute)}-{minutesToLabel(item.end_minute)}
+                </div>
+                <div className="text-xs text-slate-600">
+                  {item.kind} · {item.strength} · {item.source}
+                  {item.matches_assignment ? " · cobre esta oferta" : ""}
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="text-sm text-slate-600">Nenhuma janela cadastrada.</p>
+          )}
+        </div>
+      </DetailBlock>
+      <DetailBlock title="Preferências e restrições">
+        <div className="grid gap-3">
+          {professor.course_preferences.length ? (
+            professor.course_preferences.map((item, index) => (
+              <div key={`${item.course_id}-${index}`} className="rounded-md border border-slateLine bg-white px-3 py-2 text-sm">
+                Preferência {item.preference} · {item.strength}
+                {item.note ? <div className="mt-1 text-xs text-slate-600">{item.note}</div> : null}
+              </div>
+            ))
+          ) : (
+            <p className="text-sm text-slate-600">Sem preferência específica para esta cadeira.</p>
+          )}
+          {professor.constraints.length ? (
+            professor.constraints.map((item, index) => (
+              <div key={`${item.natural_language}-${index}`} className="rounded-md border border-slateLine bg-white px-3 py-2 text-sm">
+                <div className="font-semibold">{item.strength}</div>
+                <div className="mt-1 text-slate-700">{item.natural_language}</div>
+              </div>
+            ))
+          ) : (
+            <p className="text-sm text-slate-600">Sem restrição textual registrada.</p>
+          )}
+        </div>
+      </DetailBlock>
+    </div>
+  );
+}
+
+function SolverTab({ detail }: { detail: AssignmentDetail }) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <DetailBlock title="Decisão da alocação">
+        <DetailKeyValue label="Origem" value={detail.decision.origin} />
+        <DetailKeyValue label="Fixa/manual" value={detail.decision.fixed ? "sim" : "não"} />
+        <DetailKeyValue label="Chave da seção" value={detail.decision.section_key} />
+        <DetailKeyValue label="Sessão" value={String((detail.assignment.session_index ?? 0) % 100 + 1)} />
+      </DetailBlock>
+      <DetailBlock title="Violações">
+        <DetailKeyValue label="Hard" value={String(detail.assignment.hard_violations.length)} />
+        <DetailKeyValue label="Soft" value={String(detail.assignment.soft_violations.length)} />
+        <JsonList values={detail.assignment.hard_violations} empty="Sem violação hard." />
+        <JsonList values={detail.assignment.soft_violations} empty="Sem violação soft." />
+      </DetailBlock>
+      <DetailBlock title="Justificativas docentes">
+        <ReasonList items={detail.decision.why_professor} />
+      </DetailBlock>
+      <DetailBlock title="Justificativas da turma">
+        <ReasonList items={detail.decision.why_time_room} />
+      </DetailBlock>
+    </div>
+  );
+}
+
+function DetailBlock({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="rounded-md border border-slateLine bg-white p-3">
+      <h3 className="text-sm font-semibold uppercase text-slate-600">{title}</h3>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+function DetailKeyValue({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-[120px_1fr] gap-3 border-b border-slateLine/70 py-2 text-sm last:border-b-0">
+      <div className="text-slate-500">{label}</div>
+      <div className="min-w-0 font-medium text-ink">{value}</div>
+    </div>
+  );
+}
+
+function ReasonList({ items }: { items: string[] }) {
+  if (!items.length) return <p className="text-sm text-slate-600">Sem justificativa registrada.</p>;
+  return (
+    <div className="grid gap-2">
+      {items.map((item, index) => (
+        <div key={`${item}-${index}`} className="rounded-md border border-slateLine bg-slate-50 px-3 py-2 text-sm leading-relaxed text-slate-700">
+          {item}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ScoreBreakdown({ values }: { values: Record<string, unknown> }) {
+  const entries = Object.entries(values).filter(([, value]) => typeof value === "number" || typeof value === "string" || typeof value === "boolean");
+  if (!entries.length) return <p className="text-sm text-slate-600">Pontuação detalhada indisponível.</p>;
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {entries.map(([key, value]) => (
+        <div key={key} className="rounded-md border border-slateLine bg-slate-50 px-3 py-2 text-sm">
+          <div className="text-xs uppercase text-slate-500">{scoreLabel(key)}</div>
+          <div className="mt-1 font-semibold">{String(value)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function JsonList({ values, empty }: { values: Array<Record<string, unknown>>; empty: string }) {
+  if (!values.length) return <p className="mt-3 text-sm text-slate-600">{empty}</p>;
+  return (
+    <div className="mt-3 grid max-h-52 gap-2 overflow-y-auto pr-1">
+      {values.map((item, index) => (
+        <pre key={index} className="overflow-x-auto rounded-md border border-slateLine bg-slate-50 p-2 text-xs text-slate-700">
+          {JSON.stringify(item, null, 2)}
+        </pre>
+      ))}
+    </div>
+  );
+}
+
+function Tag({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex h-7 items-center rounded-md border border-lake/20 bg-lake/10 px-2 text-xs font-semibold text-lake">
+      {children}
+    </span>
+  );
+}
+
+function formatOptionalWindow(start?: number | null, end?: number | null) {
+  if (typeof start !== "number" || typeof end !== "number") return "horário livre";
+  return `${minutesToLabel(start)}-${minutesToLabel(end)}`;
+}
+
+function scoreLabel(value: string) {
+  const labels: Record<string, string> = {
+    first_attempt: "primeira tentativa",
+    regular: "regular",
+    reoffer: "reoferta",
+    semester_delay: "atraso",
+    failed_grade_pressure: "pressão por reprovação",
+    dependency_grade_average: "média nas dependências",
+    dependency_grade_bonus: "bônus por dependências",
+    student_priority: "prioridade do aluno",
+    preference_order_penalty: "penalidade da fila"
+  };
+  return labels[value] ?? value.replaceAll("_", " ");
 }
 
 function plannedSectionsFromMetrics(metrics: OptimizationRun["metrics"] | null | undefined): PlannedSection[] {

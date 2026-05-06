@@ -67,7 +67,11 @@ def create_teacher_link(
     payload: PresentationLinkCreate,
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
-    professor = db.get(Professor, payload.professor_id) if payload.professor_id else first_professor(db)
+    professor = (
+        db.get(Professor, payload.professor_id)
+        if payload.professor_id
+        else presentation_teacher_professor(db)
+    )
     if not professor:
         raise HTTPException(status_code=404, detail="Professor nao encontrado para o piloto")
     invitation = InvitationLink(
@@ -264,6 +268,18 @@ def presentation_plan_note(branch_label: str | None, item_note: str | None, item
     if parts:
         return " | ".join(parts)
     return f"Item {item_index} do plano enviado por QR Code"
+
+
+def presentation_teacher_professor(db: Session) -> Professor | None:
+    steffani = next(
+        (
+            professor
+            for professor in db.query(Professor).order_by(Professor.name).all()
+            if normalize_text(professor.name) == "steffani nikoli dapper"
+        ),
+        None,
+    )
+    return steffani or first_professor(db)
 
 
 def first_professor(db: Session) -> Professor | None:

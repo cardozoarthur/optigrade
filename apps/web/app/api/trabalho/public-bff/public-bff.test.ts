@@ -43,6 +43,7 @@ describe("public presentation BFF", () => {
     expect(isAllowedPublicPresentationPath(["optimization", "runs"], "POST")).toBe(true);
     expect(isAllowedPublicPresentationPath(["optimization", "runs", "run-id"], "GET")).toBe(true);
     expect(isAllowedPublicPresentationPath(["optimization", "runs", "run-id", "assignments"], "GET")).toBe(true);
+    expect(isAllowedPublicPresentationPath(["optimization", "runs", "run-id", "details"], "GET")).toBe(true);
     expect(isAllowedPublicPresentationPath(["courses"], "GET")).toBe(true);
     expect(isAllowedPublicPresentationPath(["courses"], "POST")).toBe(false);
     expect(isAllowedPublicPresentationPath(["optimization", "runs", "run-id"], "DELETE")).toBe(false);

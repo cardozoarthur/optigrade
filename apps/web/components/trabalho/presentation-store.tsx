@@ -3,6 +3,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   Assignment,
+  AssignmentDetailsResponse,
+  AssignmentDetail,
   OptimizationRun,
   PresentationLink,
   PresentationStats,
@@ -15,6 +17,7 @@ type PresentationState = {
   stats: PresentationStats | null;
   run: OptimizationRun | null;
   assignments: Assignment[];
+  assignmentDetails: AssignmentDetail[];
   optimizationStartedAt: number | null;
   optimizationError: string | null;
   loadStats: () => Promise<void>;
@@ -34,6 +37,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
   const [stats, setStats] = useState<PresentationStats | null>(null);
   const [run, setRun] = useState<OptimizationRun | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [assignmentDetails, setAssignmentDetails] = useState<AssignmentDetail[]>([]);
   const [optimizationStartedAt, setOptimizationStartedAt] = useState<number | null>(null);
   const [optimizationError, setOptimizationError] = useState<string | null>(null);
   const runRef = useRef<OptimizationRun | null>(null);
@@ -91,6 +95,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
     setOptimizationStartedAt(startedAt);
     setOptimizationError(null);
     setAssignments([]);
+    setAssignmentDetails([]);
 
     startPromiseRef.current = (async () => {
       const nextRun = await publicPresentationApi<OptimizationRun>("/optimization/runs", {
@@ -130,7 +135,12 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
     runRef.current = fresh;
     setRun(fresh);
     if (fresh.status === "feasible" || fresh.status === "infeasible" || fresh.status === "failed") {
-      setAssignments(await publicPresentationApi<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`));
+      const [nextAssignments, nextDetails] = await Promise.all([
+        publicPresentationApi<Assignment[]>(`/optimization/runs/${fresh.id}/assignments`),
+        publicPresentationApi<AssignmentDetailsResponse>(`/optimization/runs/${fresh.id}/details`)
+      ]);
+      setAssignments(nextAssignments);
+      setAssignmentDetails(nextDetails.assignments);
     }
   }, []);
 
@@ -141,6 +151,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
       stats,
       run,
       assignments,
+      assignmentDetails,
       optimizationStartedAt,
       optimizationError,
       loadStats,
@@ -157,6 +168,7 @@ export function PresentationProvider({ children }: { children: React.ReactNode }
       stats,
       run,
       assignments,
+      assignmentDetails,
       optimizationStartedAt,
       optimizationError,
       loadStats,

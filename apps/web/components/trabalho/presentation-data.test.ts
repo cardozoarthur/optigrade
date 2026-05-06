@@ -4,7 +4,8 @@ import { nextSlide, previousSlide, resolveSlide } from "@/components/trabalho/pr
 describe("trabalho slide routing", () => {
   it("resolves numeric aliases to canonical slugs", () => {
     expect(resolveSlide("slide1")).toBe("apresentacao");
-    expect(resolveSlide("slide13")).toBe("conclusao");
+    expect(resolveSlide("slide13")).toBe("resultado");
+    expect(resolveSlide("slide14")).toBe("conclusao");
   });
 
   it("keeps keyboard navigation inside the routed slide sequence", () => {

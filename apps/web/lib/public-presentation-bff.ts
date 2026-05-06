@@ -47,6 +47,7 @@ export function isAllowedPublicPresentationPath(path: string[], method: string) 
     if (method === "POST" && path.length === 2) return true;
     if (method === "GET" && path.length === 3) return true;
     if (method === "GET" && path.length === 4 && path[3] === "assignments") return true;
+    if (method === "GET" && path.length === 4 && path[3] === "details") return true;
   }
   return false;
 }

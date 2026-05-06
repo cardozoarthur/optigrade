@@ -295,6 +295,160 @@ export type Assignment = {
   origin: string;
 };
 
+export type AssignmentDetail = {
+  assignment: Assignment & {
+    section_index?: number;
+  };
+  course: AssignmentDetailCourse | null;
+  section?: PlannedSectionLike | null;
+  professor: AssignmentDetailProfessor | null;
+  room: AssignmentDetailRoom | null;
+  slot: AssignmentDetailSlot | null;
+  decision: {
+    section_key: string;
+    origin: string;
+    fixed: boolean;
+    why_professor: string[];
+    why_time_room: string[];
+  };
+  enrollments: AssignmentEnrollmentDetail[];
+};
+
+export type AssignmentDetailsResponse = {
+  run_id: string;
+  assignments: AssignmentDetail[];
+};
+
+export type PlannedSectionLike = {
+  course_name?: string;
+  db_course_id?: string;
+  section_index?: number;
+  section_label?: string;
+  planned_students?: number;
+  planned_capacity_target?: number;
+  planned_total_demand?: number;
+  planned_unserved_demand?: number;
+  strategy?: string;
+  course_turns?: string[];
+  workload_hours?: number;
+  theoretical_hours?: number;
+  practical_hours?: number;
+  [key: string]: unknown;
+};
+
+export type AssignmentDetailCourse = {
+  id: string;
+  code?: string | null;
+  name: string;
+  degree_program_id?: string | null;
+  degree_program_name?: string | null;
+  campus_id?: string | null;
+  campus_name?: string | null;
+  workload_hours: number;
+  theoretical_hours?: number | null;
+  practical_hours?: number | null;
+  kind?: string;
+  recommended_semester?: number;
+  requires_lab?: boolean;
+  context_key?: string | null;
+  shareable?: boolean;
+  official_period?: string | null;
+  official_class?: string | null;
+};
+
+export type AssignmentDetailProfessor = {
+  id: string;
+  name: string;
+  email?: string | null;
+  department?: string | null;
+  contract?: {
+    min_hours: number;
+    max_hours: number;
+    regime: string;
+    semester?: string | null;
+    is_borrowed: boolean;
+    borrowed_from_department?: string | null;
+    legal_notes?: string | null;
+    loan_notes?: string | null;
+  } | null;
+  availability: Array<{
+    day: number;
+    start_minute: number;
+    end_minute: number;
+    kind: string;
+    strength: string;
+    source: string;
+    matches_assignment: boolean;
+  }>;
+  course_preferences: Array<{
+    course_id: string;
+    preference: number;
+    strength: string;
+    note?: string | null;
+  }>;
+  constraints: Array<{
+    natural_language: string;
+    structured_rule: Record<string, unknown>;
+    strength: string;
+    confirmed: boolean;
+  }>;
+  qualifications: Array<{
+    course_id: string;
+    strength: string;
+    source: string;
+  }>;
+};
+
+export type AssignmentDetailRoom = {
+  id: string;
+  name: string;
+  capacity: number;
+  kind: string;
+  campus_id?: string | null;
+  campus_name?: string | null;
+};
+
+export type AssignmentDetailSlot = {
+  id: string;
+  day: number;
+  start_minute: number;
+  end_minute: number;
+  label: string;
+};
+
+export type AssignmentEnrollmentDetail = {
+  id: string;
+  status: string;
+  score: number;
+  score_breakdown: Record<string, unknown>;
+  reason?: string | null;
+  decision_type: string;
+  student: {
+    id: string;
+    name: string;
+    registration_number?: string | null;
+    current_semester?: number | null;
+    degree_program_id?: string | null;
+    degree_program_name?: string | null;
+  };
+  request?: {
+    id: string;
+    course_id: string;
+    priority: number;
+    preference_order: number;
+    alternative_group?: string | null;
+    desired_day?: number | null;
+    desired_start_minute?: number | null;
+    desired_end_minute?: number | null;
+    time_preference_strength?: string | null;
+    source: string;
+    note?: string | null;
+  } | null;
+  requested_course?: AssignmentDetailCourse | null;
+  assigned_course?: AssignmentDetailCourse | null;
+  why_this_section: string[];
+};
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return fetchJson<T>(`${API_URL}${path}`, init);
 }

@@ -48,7 +48,7 @@ spec:
             - -c
             - until pg_isready -h optigrade-postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do sleep 2; done
         - name: migrate-and-seed
-          image: ttl.sh/optigrade-api-20260505-equivalence-v3:24h
+          image: ttl.sh/optigrade-api-20260505-result-details:24h
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
@@ -61,7 +61,7 @@ spec:
             - alembic upgrade head && python -m app.seed
       containers:
         - name: api
-          image: ttl.sh/optigrade-api-20260505-equivalence-v3:24h
+          image: ttl.sh/optigrade-api-20260505-result-details:24h
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
