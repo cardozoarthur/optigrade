@@ -677,6 +677,142 @@ def test_equivalent_regular_courses_with_same_turn_are_absorbed_into_one_offer_f
     assert snapshot.student_demand_plan["unplanned_request_count"] == 0
 
 
+def test_demand_driven_snapshot_drops_equivalent_turn_without_any_planned_demand(
+    db_session,
+) -> None:
+    morning = DegreeProgram(
+        name="Engenharia de Computacao Manha",
+        code="EC-M",
+        schedule_start_minute=8 * 60,
+        schedule_end_minute=12 * 60,
+    )
+    night = DegreeProgram(
+        name="Engenharia de Computacao Noturno",
+        code="EC-N",
+        schedule_start_minute=19 * 60,
+        schedule_end_minute=22 * 60,
+    )
+    db_session.add_all([morning, night])
+    db_session.flush()
+    requested_intro = Course(
+        name="INTRODUCAO A ENGENHARIA DE COMPUTACAO",
+        degree_program_id=morning.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=3,
+        expected_demand=20,
+        context_key="ufpel:introducao-computacao",
+        shareable=True,
+    )
+    zero_demand_intro = Course(
+        name="INTRODUCAO A ENGENHARIA DE COMPUTACAO",
+        degree_program_id=night.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=3,
+        expected_demand=20,
+        context_key="ufpel:introducao-computacao",
+        shareable=True,
+    )
+    students = [
+        Student(name=f"Aluno EC {index}", degree_program_id=morning.id, current_semester=3)
+        for index in range(3)
+    ]
+    db_session.add_all([requested_intro, zero_demand_intro, *students])
+    db_session.flush()
+    db_session.add_all(
+        [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=requested_intro.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+            for student in students
+        ]
+    )
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+
+    assert len(snapshot.courses) == 1
+    assert snapshot.courses[0].expected_demand == 3
+    assert snapshot.courses[0].course_turns == ("manha",)
+    assert snapshot.courses[0].source_course_ids == (requested_intro.id,)
+    assert zero_demand_intro.id not in snapshot.source_course_to_snapshot_course
+    assert all(course.expected_demand > 0 for course in snapshot.courses)
+
+
+def test_first_semester_equivalent_turn_uses_forecast_instead_of_zero_demand(
+    db_session,
+) -> None:
+    morning = DegreeProgram(
+        name="Engenharia de Computacao Manha",
+        code="EC-M",
+        schedule_start_minute=8 * 60,
+        schedule_end_minute=12 * 60,
+    )
+    night = DegreeProgram(
+        name="Engenharia de Computacao Noturno",
+        code="EC-N",
+        schedule_start_minute=19 * 60,
+        schedule_end_minute=22 * 60,
+    )
+    db_session.add_all([morning, night])
+    db_session.flush()
+    requested_intro = Course(
+        name="INTRODUCAO A ENGENHARIA DE COMPUTACAO",
+        degree_program_id=morning.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=30,
+        context_key="ufpel:introducao-computacao",
+        shareable=True,
+    )
+    freshman_intro = Course(
+        name="INTRODUCAO A ENGENHARIA DE COMPUTACAO",
+        degree_program_id=night.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=40,
+        context_key="ufpel:introducao-computacao",
+        shareable=True,
+    )
+    students = [
+        Student(name=f"Calouro EC {index}", degree_program_id=morning.id, current_semester=1)
+        for index in range(3)
+    ]
+    db_session.add_all([requested_intro, freshman_intro, *students])
+    db_session.flush()
+    db_session.add_all(
+        [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=requested_intro.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+            for student in students
+        ]
+    )
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+    courses_by_turn = {course.course_turns[0]: course for course in snapshot.courses}
+
+    assert set(courses_by_turn) == {"manha", "noturno"}
+    assert courses_by_turn["manha"].expected_demand == 3
+    assert courses_by_turn["noturno"].expected_demand == 40
+    assert courses_by_turn["noturno"].regular_time_windows == ((19 * 60, 22 * 60),)
+    assert all(course.expected_demand > 0 for course in snapshot.courses)
+
+
 def test_demand_planner_closes_marginal_course_when_second_option_absorbs_students(
     db_session,
 ) -> None:

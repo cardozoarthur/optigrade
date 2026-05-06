@@ -2227,6 +2227,8 @@ def build_course_snapshot(
             regular_demand_by_course,
             demand_driven=demand_driven,
         )
+        if demand_driven and course_data.expected_demand <= 0:
+            continue
         expanded_courses = expand_course_sections(course_data, rooms or [], demand_driven=demand_driven)
         courses.extend(expanded_courses)
         for source_course_id in course_data.source_course_ids:
@@ -2368,11 +2370,10 @@ def merge_course_group(
             }
         )
     )
-    expected_demand = sum(
-        requested_demand_by_course.get(course.id, 0)
-        if demand_driven and requested_demand_by_course
-        else max(course.expected_demand, requested_demand_by_course.get(course.id, 0))
-        for course in group
+    expected_demand = expected_demand_for_group(
+        group,
+        requested_demand_by_course,
+        demand_driven=demand_driven,
     )
     return CourseData(
         id=snapshot_id,
@@ -2440,6 +2441,33 @@ def expand_course_sections(
         )
         for index, size in enumerate(section_sizes)
     ]
+
+
+def expected_demand_for_group(
+    group: list[Course],
+    requested_demand_by_course: dict[str, int],
+    *,
+    demand_driven: bool,
+) -> int:
+    if not demand_driven:
+        return sum(
+            max(course.expected_demand, requested_demand_by_course.get(course.id, 0))
+            for course in group
+        )
+    requested_demand = sum(requested_demand_by_course.get(course.id, 0) for course in group)
+    if requested_demand > 0:
+        return requested_demand
+    if group and all(first_semester_intake_placeholder(course) for course in group):
+        return sum(max(course.expected_demand, 0) for course in group)
+    return 0
+
+
+def first_semester_intake_placeholder(course: Course) -> bool:
+    return (
+        is_regular_curriculum_course(course)
+        and course.recommended_semester <= 1
+        and course.expected_demand > 0
+    )
 
 
 def planned_section_sizes(course: CourseData, rooms: list[RoomData]) -> tuple[list[int], int, str]:
@@ -2560,7 +2588,11 @@ def regular_time_windows_for_group(
     regular_demand_by_course = regular_demand_by_course or {}
     windows: set[tuple[int, int]] = set()
     for course in group:
-        if demand_driven and regular_demand_by_course.get(course.id, 0) <= 0:
+        if (
+            demand_driven
+            and regular_demand_by_course.get(course.id, 0) <= 0
+            and not first_semester_intake_placeholder(course)
+        ):
             continue
         if not is_regular_curriculum_course(course):
             continue
@@ -2585,6 +2617,7 @@ def course_turns_for_group(
             demand_driven
             and requested_demand_by_course.get(course.id, 0) <= 0
             and regular_demand_by_course.get(course.id, 0) <= 0
+            and not first_semester_intake_placeholder(course)
         ):
             continue
         if not is_regular_curriculum_course(course):

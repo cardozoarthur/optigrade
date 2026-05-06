@@ -1171,7 +1171,8 @@ function CalendarPreview({
                     const coursePeriod = sectionPlan ? coursePeriodLabel(sectionPlan) : null;
                     const workload = sectionPlan?.workload_hours ?? course?.workload_hours;
                     const detail = detailByAssignmentId[assignment.id];
-                    const enrolledCount = detail?.enrollments.length ?? sectionPlan?.planned_students ?? 0;
+                    const allocatedCount = detail?.enrollments.length ?? 0;
+                    const plannedCount = sectionPlan?.planned_students ?? allocatedCount;
                     return (
                       <button
                         key={assignment.id}
@@ -1183,9 +1184,14 @@ function CalendarPreview({
                         <div className="font-semibold text-ink">{courseTitle}</div>
                         <div className="mt-1 font-medium text-lake">
                           {sectionPlan
-                            ? `${sectionPlan.section_label} · ${enrolledCount} inscritos`
+                            ? `${sectionPlan.section_label} · ${plannedCount} planejados`
                             : `Turma ${sectionIndex + 1}`}
                         </div>
+                        {sectionPlan ? (
+                          <div className="text-slate-600">
+                            {allocatedCount ? `${allocatedCount} alunos alocados` : "Sem alocação nominal ainda"}
+                          </div>
+                        ) : null}
                         <div className="mt-1 text-slate-600">
                           Turno do curso: {coursePeriod ?? "não informado"}
                           {workload ? ` · ${workload}h` : ""}
@@ -1333,12 +1339,13 @@ function AssignmentDetailModal({
 
 function EnrollmentTab({ detail }: { detail: AssignmentDetail }) {
   const enrollments = detail.enrollments;
+  const plannedStudents = detail.section?.planned_students ?? enrollments.length;
   return (
     <div className="grid gap-4">
       <div className="grid gap-3 sm:grid-cols-3">
-        <MetricTile label="Inscritos vinculados" value={String(enrollments.length)} tone={enrollments.length ? "green" : "amber"} />
+        <MetricTile label="Alunos alocados" value={String(enrollments.length)} tone={enrollments.length ? "green" : "amber"} />
         <MetricTile label="Capacidade física" value={String(detail.room?.capacity ?? "-")} />
-        <MetricTile label="Demanda planejada" value={String(detail.section?.planned_students ?? "-")} />
+        <MetricTile label="Demanda planejada" value={String(plannedStudents)} />
       </div>
       {enrollments.length ? (
         <div className="grid gap-3">
@@ -1347,9 +1354,9 @@ function EnrollmentTab({ detail }: { detail: AssignmentDetail }) {
           ))}
         </div>
       ) : (
-        <DetailBlock title="Sem inscrições atribuídas">
+        <DetailBlock title="Sem alunos alocados">
           <p className="text-sm leading-relaxed text-slate-700">
-            A oferta existe, mas o detalhe público do run não encontrou alunos matriculados nesta turma.
+            A oferta possui demanda planejada, mas o detalhe público do run ainda não encontrou alunos nominalmente alocados nesta turma.
           </p>
         </DetailBlock>
       )}
