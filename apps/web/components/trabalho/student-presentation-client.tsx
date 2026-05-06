@@ -31,6 +31,12 @@ type PresentationPlanBranch = {
   items: PresentationPlanItem[];
 };
 
+type PresentationChoiceUnit = {
+  id: string;
+  label: string;
+  alternatives: PresentationPlanBranch[];
+};
+
 const weekDays = [
   { value: "0", label: "Segunda" },
   { value: "1", label: "Terça" },
@@ -48,8 +54,9 @@ export function StudentPresentationClient({ token }: { token: string }) {
   const [loadFailed, setLoadFailed] = useState(false);
   const [student, setStudent] = useState<Student | null>(null);
   const [suggestions, setSuggestions] = useState<StudentCourseSuggestion[]>([]);
-  const [branches, setBranches] = useState<PresentationPlanBranch[]>(() => defaultPresentationBranches());
-  const [activeBranchId, setActiveBranchId] = useState("");
+  const [units, setUnits] = useState<PresentationChoiceUnit[]>(() => defaultPresentationUnits());
+  const [activeUnitId, setActiveUnitId] = useState("");
+  const [activeAlternativeId, setActiveAlternativeId] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
@@ -57,8 +64,11 @@ export function StudentPresentationClient({ token }: { token: string }) {
   const [result, setResult] = useState<PortalOptimizationResult | null>(null);
   const [resultLoading, setResultLoading] = useState(false);
   const [lastResultCheck, setLastResultCheck] = useState<Date | null>(null);
-  const activeBranch = branches.find((branch) => branch.id === activeBranchId) ?? branches[0];
-  const activeBranchCourseIds = activeBranch?.items.map((item) => item.courseId) ?? [];
+  const activeUnit = units.find((unit) => unit.id === activeUnitId) ?? units[0];
+  const activeAlternative =
+    activeUnit?.alternatives.find((alternative) => alternative.id === activeAlternativeId) ??
+    activeUnit?.alternatives[0];
+  const activeAlternativeCourseIds = activeAlternative?.items.map((item) => item.courseId) ?? [];
   const eligibleCourseIds = useMemo(
     () => new Set(suggestions.filter((item) => item.eligible).map((item) => item.course.id)),
     [suggestions]
@@ -68,8 +78,15 @@ export function StudentPresentationClient({ token }: { token: string }) {
     [suggestions]
   );
   const selectedCourseIds = useMemo(
-    () => Array.from(new Set(branches.flatMap((branch) => branch.items.map((item) => item.courseId)))),
-    [branches]
+    () =>
+      Array.from(
+        new Set(
+          units.flatMap((unit) =>
+            unit.alternatives.flatMap((alternative) => alternative.items.map((item) => item.courseId))
+          )
+        )
+      ),
+    [units]
   );
   const selectedItems = useMemo(
     () => suggestions.filter((item) => selectedCourseIds.includes(item.course.id)),
@@ -86,10 +103,16 @@ export function StudentPresentationClient({ token }: { token: string }) {
   }, [toast, token]);
 
   useEffect(() => {
-    if (!activeBranchId && branches[0]) {
-      setActiveBranchId(branches[0].id);
+    if (!activeUnitId && units[0]) {
+      setActiveUnitId(units[0].id);
+      setActiveAlternativeId(units[0].alternatives[0]?.id ?? "");
+      return;
     }
-  }, [activeBranchId, branches]);
+    const nextActiveUnit = units.find((unit) => unit.id === activeUnitId) ?? units[0];
+    if (nextActiveUnit && !nextActiveUnit.alternatives.some((alternative) => alternative.id === activeAlternativeId)) {
+      setActiveAlternativeId(nextActiveUnit.alternatives[0]?.id ?? "");
+    }
+  }, [activeAlternativeId, activeUnitId, units]);
 
   const fetchResult = useCallback(async () => {
     if (!student) return;
@@ -126,9 +149,10 @@ export function StudentPresentationClient({ token }: { token: string }) {
       });
       setStudent(created.student);
       setSuggestions(created.suggestions.suggestions);
-      const seededBranches = seedPresentationBranches(created.suggestions.suggestions);
-      setBranches(seededBranches);
-      setActiveBranchId(seededBranches[0]?.id ?? "");
+      const seededUnits = seedPresentationUnits(created.suggestions.suggestions);
+      setUnits(seededUnits);
+      setActiveUnitId(seededUnits[0]?.id ?? "");
+      setActiveAlternativeId(seededUnits[0]?.alternatives[0]?.id ?? "");
       setSubmitted(false);
       setResult(null);
       toast.success("Histórico gerado. Agora revise seu plano de preferência.", "Aluno criado");
@@ -142,7 +166,7 @@ export function StudentPresentationClient({ token }: { token: string }) {
   async function submitChoices(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!student) return;
-    const plan = buildPresentationPayload(branches, eligibleCourseIds);
+    const plan = buildPresentationPayload(units, eligibleCourseIds);
     if (plan.error || !plan.branches.length) {
       toast.error(plan.error ?? "Adicione ao menos uma cadeira elegível ao plano.", "Revise suas escolhas");
       return;
@@ -163,53 +187,102 @@ export function StudentPresentationClient({ token }: { token: string }) {
   }
 
   function toggleCourse(courseId: string) {
-    const branchId = activeBranch?.id ?? branches[0]?.id;
-    if (!branchId) return;
-    setBranches((current) =>
-      current.map((branch) => {
-        if (branch.id !== branchId) return branch;
-        if (branch.items.some((item) => item.courseId === courseId)) {
-          return { ...branch, items: branch.items.filter((item) => item.courseId !== courseId) };
-        }
-        return { ...branch, items: [...branch.items, createPresentationItem(courseId)] };
+    const unitId = activeUnit?.id ?? units[0]?.id;
+    const alternativeId = activeAlternative?.id ?? activeUnit?.alternatives[0]?.id;
+    if (!unitId || !alternativeId) return;
+    setUnits((current) =>
+      current.map((unit) => {
+        if (unit.id !== unitId) return unit;
+        return {
+          ...unit,
+          alternatives: unit.alternatives.map((alternative) => {
+            if (alternative.id !== alternativeId) return alternative;
+            if (alternative.items.some((item) => item.courseId === courseId)) {
+              return { ...alternative, items: alternative.items.filter((item) => item.courseId !== courseId) };
+            }
+            return { ...alternative, items: [...alternative.items, createPresentationItem(courseId)] };
+          })
+        };
       })
     );
   }
 
-  function addBranch() {
-    const branch = createPresentationBranch(`Caminho ${branches.length + 1}`, Math.max(1, 5 - branches.length));
-    setBranches((current) => [...current, branch]);
-    setActiveBranchId(branch.id);
+  function addUnit() {
+    const unit = createPresentationUnit(`Demanda ${units.length + 1}`);
+    setUnits((current) => [...current, unit]);
+    setActiveUnitId(unit.id);
+    setActiveAlternativeId(unit.alternatives[0]?.id ?? "");
   }
 
-  function removeBranch(branchId: string) {
-    if (branches.length <= 1) return;
-    const nextActive = branches.find((branch) => branch.id !== branchId);
-    setBranches((current) => current.filter((branch) => branch.id !== branchId));
-    if (activeBranchId === branchId) setActiveBranchId(nextActive?.id ?? "");
+  function removeUnit(unitId: string) {
+    if (units.length <= 1) return;
+    const nextActive = units.find((unit) => unit.id !== unitId);
+    setUnits((current) => current.filter((unit) => unit.id !== unitId));
+    if (activeUnitId === unitId) {
+      setActiveUnitId(nextActive?.id ?? "");
+      setActiveAlternativeId(nextActive?.alternatives[0]?.id ?? "");
+    }
+  }
+
+  function addAlternative() {
+    if (!activeUnit) return;
+    const alternative = createPresentationBranch(`Opção ${activeUnit.alternatives.length + 1}`, Math.max(1, 5 - activeUnit.alternatives.length));
+    setUnits((current) =>
+      current.map((unit) =>
+        unit.id === activeUnit.id ? { ...unit, alternatives: [...unit.alternatives, alternative] } : unit
+      )
+    );
+    setActiveAlternativeId(alternative.id);
+  }
+
+  function removeAlternative(alternativeId: string) {
+    if (!activeUnit || activeUnit.alternatives.length <= 1) return;
+    const nextAlternative = activeUnit.alternatives.find((alternative) => alternative.id !== alternativeId);
+    setUnits((current) =>
+      current.map((unit) =>
+        unit.id === activeUnit.id
+          ? { ...unit, alternatives: unit.alternatives.filter((alternative) => alternative.id !== alternativeId) }
+          : unit
+      )
+    );
+    if (activeAlternativeId === alternativeId) setActiveAlternativeId(nextAlternative?.id ?? "");
   }
 
   function updateItem(itemId: string, patch: Partial<PresentationPlanItem>) {
-    if (!activeBranch) return;
-    setBranches((current) =>
-      current.map((branch) =>
-        branch.id === activeBranch.id
+    if (!activeUnit || !activeAlternative) return;
+    setUnits((current) =>
+      current.map((unit) =>
+        unit.id === activeUnit.id
           ? {
-              ...branch,
-              items: branch.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
+              ...unit,
+              alternatives: unit.alternatives.map((alternative) =>
+                alternative.id === activeAlternative.id
+                  ? {
+                      ...alternative,
+                      items: alternative.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
+                    }
+                  : alternative
+              )
             }
-          : branch
+          : unit
       )
     );
   }
 
   function removeItem(itemId: string) {
-    if (!activeBranch) return;
-    setBranches((current) =>
-      current.map((branch) =>
-        branch.id === activeBranch.id
-          ? { ...branch, items: branch.items.filter((item) => item.id !== itemId) }
-          : branch
+    if (!activeUnit || !activeAlternative) return;
+    setUnits((current) =>
+      current.map((unit) =>
+        unit.id === activeUnit.id
+          ? {
+              ...unit,
+              alternatives: unit.alternatives.map((alternative) =>
+                alternative.id === activeAlternative.id
+                  ? { ...alternative, items: alternative.items.filter((item) => item.id !== itemId) }
+                  : alternative
+              )
+            }
+          : unit
       )
     );
   }
@@ -282,59 +355,97 @@ export function StudentPresentationClient({ token }: { token: string }) {
             <section className="rounded-lg border border-slateLine bg-white p-4 shadow-panel sm:p-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
-                  <h2 className="text-base font-semibold">Plano principal: quero X, senão Y + Z</h2>
+                  <h2 className="text-base font-semibold">Demandas independentes por cadeira</h2>
                   <p className="mt-1 text-sm text-slate-600">
-                    {activeBranch?.label ?? "Caminho"} · {activeBranch?.items.length ?? 0} cadeiras no pacote atual.
+                    {activeUnit?.label ?? "Demanda"} · {activeAlternative?.label ?? "Opção"} ·{" "}
+                    {activeAlternative?.items.length ?? 0} cadeiras nesta alternativa.
                   </p>
                 </div>
-                <button type="button" onClick={addBranch} className={`${secondaryClass} w-full sm:w-auto`}>
-                  <Plus size={16} />
-                  Caminho
-                </button>
+                <div className="grid gap-2 sm:flex">
+                  <button type="button" onClick={addUnit} className={`${secondaryClass} w-full sm:w-auto`}>
+                    <Plus size={16} />
+                    Demanda
+                  </button>
+                  <button type="button" onClick={addAlternative} className={`${secondaryClass} w-full sm:w-auto`}>
+                    <Plus size={16} />
+                    Opção
+                  </button>
+                </div>
               </div>
               <div className="mt-4 flex max-w-full gap-2 overflow-x-auto pb-1">
-                {branches.map((branch, index) => (
+                {units.map((unit, index) => (
                   <button
                     type="button"
-                    key={branch.id}
-                    onClick={() => setActiveBranchId(branch.id)}
+                    key={unit.id}
+                    onClick={() => {
+                      setActiveUnitId(unit.id);
+                      setActiveAlternativeId(unit.alternatives[0]?.id ?? "");
+                    }}
                     className={`h-10 shrink-0 rounded-md border px-3 text-sm font-semibold transition ${
-                      activeBranch?.id === branch.id
+                      activeUnit?.id === unit.id
                         ? "border-lake bg-lake text-white"
                         : "border-slateLine bg-white hover:border-lake"
                     }`}
                   >
-                    {index + 1}. {branch.label} · {branch.items.length}
+                    {index + 1}. {unit.label} · {unit.alternatives.length}
                   </button>
                 ))}
                 <button
                   type="button"
-                  onClick={() => activeBranch && removeBranch(activeBranch.id)}
-                  disabled={branches.length <= 1}
+                  onClick={() => activeUnit && removeUnit(activeUnit.id)}
+                  disabled={units.length <= 1}
                   className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-slateLine text-rose transition hover:border-rose disabled:opacity-40"
-                  title="Remover caminho"
-                  aria-label="Remover caminho"
+                  title="Remover demanda"
+                  aria-label="Remover demanda"
                 >
                   <Trash2 size={16} />
                 </button>
               </div>
+              {activeUnit ? (
+                <div className="mt-2 flex max-w-full gap-2 overflow-x-auto pb-1">
+                  {activeUnit.alternatives.map((alternative, index) => (
+                    <button
+                      type="button"
+                      key={alternative.id}
+                      onClick={() => setActiveAlternativeId(alternative.id)}
+                      className={`h-9 shrink-0 rounded-md border px-3 text-xs font-semibold transition ${
+                        activeAlternative?.id === alternative.id
+                          ? "border-moss bg-moss text-white"
+                          : "border-slateLine bg-slate-50 hover:border-moss"
+                      }`}
+                    >
+                      {index + 1}. {alternative.label} · {alternative.items.length}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => activeAlternative && removeAlternative(activeAlternative.id)}
+                    disabled={activeUnit.alternatives.length <= 1}
+                    className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slateLine text-rose transition hover:border-rose disabled:opacity-40"
+                    title="Remover opção"
+                    aria-label="Remover opção"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ) : null}
               <p className="mt-1 text-sm text-slate-600">
-                O solver tenta alocar um caminho inteiro antes de passar para o próximo.
+                Cada demanda é decidida separadamente; uma opção pode ter uma ou várias cadeiras. Ex.: Cálculo A senão Álgebra + Geometria.
               </p>
               <div className="mt-4 grid gap-2">
                 {suggestions.slice(0, 14).map((item) => (
                   <CourseChoice
                     key={item.course.id}
                     item={item}
-                    selected={activeBranchCourseIds.includes(item.course.id)}
-                    order={activeBranchCourseIds.indexOf(item.course.id) + 1}
+                    selected={activeAlternativeCourseIds.includes(item.course.id)}
+                    order={activeAlternativeCourseIds.indexOf(item.course.id) + 1}
                     onClick={() => item.eligible && toggleCourse(item.course.id)}
                   />
                 ))}
               </div>
-              {activeBranch?.items.length ? (
+              {activeAlternative?.items.length ? (
                 <div className="mt-4 grid gap-2">
-                  {activeBranch.items.map((item) => (
+                  {activeAlternative.items.map((item) => (
                     <div
                       key={item.id}
                       className="grid min-w-0 gap-2 rounded-md border border-slateLine bg-slate-50 p-3 md:grid-cols-[minmax(160px,1fr)_110px_100px_100px_120px_40px]"
@@ -505,47 +616,93 @@ function createPresentationBranch(
   };
 }
 
-function defaultPresentationBranches() {
+function createPresentationUnit(
+  label: string,
+  alternatives: PresentationPlanBranch[] = [
+    createPresentationBranch("Opção principal", 5),
+    createPresentationBranch("Se não", 4)
+  ],
+  id = createDraftId("unit")
+): PresentationChoiceUnit {
+  return {
+    id,
+    label,
+    alternatives
+  };
+}
+
+function defaultPresentationUnits() {
   return [
-    createPresentationBranch("Cálculo primeiro", 5, [], "presentation-default-a"),
-    createPresentationBranch("Plano alternativo", 4, [], "presentation-default-b")
+    createPresentationUnit(
+      "Demanda 1",
+      [
+        createPresentationBranch("Opção principal", 5, [], "presentation-default-a1"),
+        createPresentationBranch("Se não", 4, [], "presentation-default-a2")
+      ],
+      "presentation-demand-a"
+    ),
+    createPresentationUnit(
+      "Demanda 2",
+      [
+        createPresentationBranch("Opção principal", 5, [], "presentation-default-b1"),
+        createPresentationBranch("Se não", 4, [], "presentation-default-b2")
+      ],
+      "presentation-demand-b"
+    )
   ];
 }
 
-function seedPresentationBranches(suggestions: StudentCourseSuggestion[]) {
+function seedPresentationUnits(suggestions: StudentCourseSuggestion[]) {
   const eligible = suggestions.filter((item) => item.eligible).map((item) => item.course.id);
-  if (!eligible.length) return defaultPresentationBranches();
+  if (!eligible.length) return defaultPresentationUnits();
   return [
-    createPresentationBranch("Cálculo primeiro", 5, eligible.slice(0, 1).map((courseId) => createPresentationItem(courseId))),
-    createPresentationBranch("Plano alternativo", 4, eligible.slice(1, 4).map((courseId) => createPresentationItem(courseId)))
+    createPresentationUnit(
+      "Recuperar prioridade",
+      [
+        createPresentationBranch("Opção principal", 5, eligible.slice(0, 1).map((courseId) => createPresentationItem(courseId))),
+        createPresentationBranch("Se não", 4, eligible.slice(1, 3).map((courseId) => createPresentationItem(courseId)))
+      ],
+      "presentation-demand-a"
+    ),
+    createPresentationUnit(
+      "Completar carga",
+      [
+        createPresentationBranch("Opção principal", 5, eligible.slice(3, 4).map((courseId) => createPresentationItem(courseId))),
+        createPresentationBranch("Se não", 4, eligible.slice(4, 6).map((courseId) => createPresentationItem(courseId)))
+      ],
+      "presentation-demand-b"
+    )
   ];
 }
 
-function buildPresentationPayload(branches: PresentationPlanBranch[], eligibleCourseIds: Set<string>) {
+function buildPresentationPayload(units: PresentationChoiceUnit[], eligibleCourseIds: Set<string>) {
   const payloadBranches = [];
-  for (const [index, branch] of branches.entries()) {
-    const items = [];
-    for (const item of branch.items) {
-      if (!item.courseId || !eligibleCourseIds.has(item.courseId)) continue;
-      const time = parseOptionalTimeWindow(item);
-      if (time.error) return { branches: [], error: time.error };
-      items.push({
-        course_id: item.courseId,
-        priority: null,
-        desired_day: time.day,
-        desired_start_minute: time.start,
-        desired_end_minute: time.end,
-        time_preference_strength: item.strength,
-        note: null
-      });
-    }
-    if (items.length) {
-      payloadBranches.push({
-        preference_order: index + 1,
-        priority: branch.priority,
-        label: branch.label,
-        items
-      });
+  for (const unit of units) {
+    for (const [index, alternative] of unit.alternatives.entries()) {
+      const items = [];
+      for (const item of alternative.items) {
+        if (!item.courseId || !eligibleCourseIds.has(item.courseId)) continue;
+        const time = parseOptionalTimeWindow(item);
+        if (time.error) return { branches: [], error: time.error };
+        items.push({
+          course_id: item.courseId,
+          priority: null,
+          desired_day: time.day,
+          desired_start_minute: time.start,
+          desired_end_minute: time.end,
+          time_preference_strength: item.strength,
+          note: null
+        });
+      }
+      if (items.length) {
+        payloadBranches.push({
+          choice_group: unit.id,
+          preference_order: index + 1,
+          priority: alternative.priority,
+          label: `${unit.label}: ${alternative.label}`,
+          items
+        });
+      }
     }
   }
   return { branches: payloadBranches };

@@ -90,6 +90,68 @@ def test_enrollment_round_uses_alternative_queue_until_student_is_allocated(db_s
     assert {item.course_id for item in enrollments} == {calculus_a.id, calculus_b.id}
 
 
+def test_enrollment_round_scores_alternatives_instead_of_stopping_at_first_available(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia", code="ENG")
+    db_session.add(program)
+    db_session.flush()
+    low_value = Course(
+        name="Optativa com menor valor",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.elective,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    high_value = Course(
+        name="Disciplina crítica",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=1,
+    )
+    student = Student(name="Aluno Solver", degree_program_id=program.id, current_semester=2)
+    db_session.add_all([low_value, high_value, student])
+    db_session.flush()
+    db_session.add_all(
+        [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=low_value.id,
+                target_semester="2026/2",
+                alternative_group="valor-institucional",
+                preference_order=1,
+                priority=1,
+            ),
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=high_value.id,
+                target_semester="2026/2",
+                alternative_group="valor-institucional",
+                preference_order=2,
+                priority=5,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    summary = run_enrollment_round(db_session, "2026/2")
+    enrolled = (
+        db_session.query(StudentEnrollment)
+        .filter(StudentEnrollment.status == "enrolled")
+        .one()
+    )
+
+    assert summary["enrolled"] == 1
+    assert enrolled.course_id == high_value.id
+    assert enrolled.score_breakdown["student_priority"] == 15
+    assert enrolled.score_breakdown["preference_order_penalty"] == -4
+
+
 def test_enrollment_round_uses_prerequisite_grades_as_tiebreaker(db_session) -> None:
     program = DegreeProgram(name="Computacao", code="CC")
     db_session.add(program)

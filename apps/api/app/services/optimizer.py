@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
+from ortools.sat.python import cp_model
 
 from app.core.config import settings
 from app.models.entities import (
@@ -50,6 +51,9 @@ PLANNING_SECTION_CAPACITY = 50
 PLANNING_MIN_SECTION_DEMAND = 3
 DEMAND_SECTION_COST = 90.0
 SECTION_SESSION_OFFSET = 100
+DEMAND_CP_SAT_GROUP_LIMIT = 800
+DEMAND_CP_SAT_OPTION_LIMIT = 4_000
+DEMAND_COST_SCALE = 10
 
 
 @dataclass(frozen=True)
@@ -627,6 +631,7 @@ def solve_student_demand_plan(
     }
     buckets = build_demand_planning_buckets(raw_courses, rooms)
 
+    choice_solver_assignments = 0
     if demand_driven and allocations:
         allocations = optimize_student_choice_allocations(
             ordered_choices,
@@ -635,6 +640,11 @@ def solve_student_demand_plan(
             buckets,
             regular_demand_by_course=regular_demand_by_course,
             protected_groups=protected_groups,
+        )
+        choice_solver_assignments = sum(
+            1
+            for group, bundle in allocations.items()
+            if ordered_choices.get(group) and ordered_choices[group][0].request_ids != bundle.request_ids
         )
         allocations, consolidation_events = consolidate_single_section_buckets(
             ordered_choices,
@@ -708,6 +718,7 @@ def solve_student_demand_plan(
             if len(bundle.choices) > 1
         ),
         "alternative_assignments": alternative_assignments,
+        "choice_solver_assignments": choice_solver_assignments,
         "consolidated_choice_groups": sum(len(item["moved_groups"]) for item in consolidation_events),
         "consolidated_closed_buckets": consolidation_events,
         "minimum_coverage_restored_groups": len(minimum_coverage_events),
@@ -830,6 +841,171 @@ def mandatory_regular_bundle(bundle: DemandChoiceBundle) -> bool:
     return any(choice.relation == "regular" for choice in bundle.choices)
 
 
+def solve_student_choice_allocations_cp_sat(
+    ordered_choices: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]],
+    initial_allocations: dict[tuple[str, str], DemandChoiceBundle],
+    bucket_by_course: dict[str, tuple[Any, ...]],
+    buckets: dict[tuple[Any, ...], DemandPlanningBucket],
+    *,
+    regular_demand_by_course: dict[str, int],
+    protected_groups: set[tuple[str, str]],
+) -> dict[tuple[str, str], DemandChoiceBundle] | None:
+    option_count = sum(len(bundles) for bundles in ordered_choices.values())
+    if (
+        not ordered_choices
+        or len(ordered_choices) > DEMAND_CP_SAT_GROUP_LIMIT
+        or option_count > DEMAND_CP_SAT_OPTION_LIMIT
+    ):
+        return None
+
+    model = cp_model.CpModel()
+    variables: dict[tuple[tuple[str, str], int], cp_model.IntVar] = {}
+    options_by_group: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]] = {}
+    for group_index, (group, bundles) in enumerate(ordered_choices.items()):
+        allowed_bundles = demand_solver_allowed_bundles(group, bundles, protected_groups)
+        if not allowed_bundles:
+            continue
+        options_by_group[group] = allowed_bundles
+        group_vars = []
+        for option_index, _bundle in enumerate(allowed_bundles):
+            var = model.new_bool_var(f"choice_{group_index}_{option_index}")
+            variables[(group, option_index)] = var
+            group_vars.append(var)
+        model.add_exactly_one(group_vars)
+
+    if not variables:
+        return None
+
+    objective_terms: list[Any] = []
+    regular_bucket_floor = bucket_demand_from_course_demand(
+        regular_demand_by_course,
+        bucket_by_course,
+    )
+    for bucket_index, (bucket_key, bucket) in enumerate(buckets.items()):
+        max_demand = regular_bucket_floor.get(bucket_key, 0)
+        for group, bundles in options_by_group.items():
+            max_demand += max(
+                (
+                    bundle_bucket_demand(
+                        bundle,
+                        bucket_by_course,
+                        regular_demand_by_course,
+                    ).get(bucket_key, 0)
+                    for bundle in bundles
+                ),
+                default=0,
+            )
+        costs = [
+            int(round(demand_bucket_cost(demand, bucket) * DEMAND_COST_SCALE))
+            for demand in range(max_demand + 1)
+        ]
+        demand_var = model.new_int_var(0, max_demand, f"demand_{bucket_index}")
+        cost_var = model.new_int_var(0, max(costs, default=0), f"demand_cost_{bucket_index}")
+        demand_terms = []
+        for group, bundles in options_by_group.items():
+            for option_index, bundle in enumerate(bundles):
+                amount = bundle_bucket_demand(
+                    bundle,
+                    bucket_by_course,
+                    regular_demand_by_course,
+                ).get(bucket_key, 0)
+                if amount:
+                    demand_terms.append(amount * variables[(group, option_index)])
+        model.add(demand_var == regular_bucket_floor.get(bucket_key, 0) + sum(demand_terms))
+        model.add_element(demand_var, costs, cost_var)
+        objective_terms.append(cost_var)
+
+    for group, bundles in options_by_group.items():
+        for option_index, bundle in enumerate(bundles):
+            penalty = int(round(demand_choice_penalty(bundle) * DEMAND_COST_SCALE))
+            if penalty:
+                objective_terms.append(penalty * variables[(group, option_index)])
+
+    model.minimize(sum(objective_terms))
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 2.5
+    solver.parameters.num_search_workers = 8
+    status = solver.solve(model)
+    if status not in {cp_model.OPTIMAL, cp_model.FEASIBLE}:
+        return None
+
+    allocations = dict(initial_allocations)
+    for group, bundles in options_by_group.items():
+        for option_index, bundle in enumerate(bundles):
+            if solver.boolean_value(variables[(group, option_index)]):
+                allocations[group] = bundle
+                break
+    return allocations
+
+
+def demand_solver_allowed_bundles(
+    group: tuple[str, str],
+    bundles: tuple[DemandChoiceBundle, ...],
+    protected_groups: set[tuple[str, str]],
+) -> tuple[DemandChoiceBundle, ...]:
+    if group not in protected_groups:
+        return bundles
+    mandatory = tuple(bundle for bundle in bundles if mandatory_regular_bundle(bundle))
+    return mandatory or bundles[:1]
+
+
+def improve_student_choice_allocations_by_objective(
+    ordered_choices: dict[tuple[str, str], tuple[DemandChoiceBundle, ...]],
+    initial_allocations: dict[tuple[str, str], DemandChoiceBundle],
+    bucket_by_course: dict[str, tuple[Any, ...]],
+    buckets: dict[tuple[Any, ...], DemandPlanningBucket],
+    *,
+    regular_demand_by_course: dict[str, int],
+    protected_groups: set[tuple[str, str]],
+) -> dict[tuple[str, str], DemandChoiceBundle]:
+    allocations = dict(initial_allocations)
+    bucket_demand = bucket_demand_from_course_demand(
+        demand_with_regular_floor(
+            incremental_demand_from_bundle_allocations(
+                allocations.values(),
+                regular_demand_by_course,
+            ),
+            regular_demand_by_course,
+        ),
+        bucket_by_course,
+    )
+
+    for _round in range(16):
+        best_group: tuple[str, str] | None = None
+        best_choice: DemandChoiceBundle | None = None
+        best_delta = 0.0
+        for group, current_choice in allocations.items():
+            if group in protected_groups:
+                continue
+            for alternative in ordered_choices.get(group, ()):
+                if alternative.request_ids == current_choice.request_ids:
+                    continue
+                delta = demand_move_delta(
+                    current_choice,
+                    alternative,
+                    bucket_demand,
+                    buckets,
+                    bucket_by_course,
+                    regular_demand_by_course,
+                )
+                if delta < best_delta:
+                    best_delta = delta
+                    best_group = group
+                    best_choice = alternative
+        if best_group is None or best_choice is None:
+            break
+        previous = allocations[best_group]
+        allocations[best_group] = best_choice
+        apply_bundle_move(
+            bucket_demand,
+            previous,
+            best_choice,
+            bucket_by_course,
+            regular_demand_by_course,
+        )
+    return allocations
+
+
 def incremental_demand_from_bundle_allocations(
     bundles: Any,
     regular_demand_by_course: dict[str, int],
@@ -890,9 +1066,27 @@ def optimize_student_choice_allocations(
     regular_demand_by_course: dict[str, int] | None = None,
     protected_groups: set[tuple[str, str]] | None = None,
 ) -> dict[tuple[str, str], DemandChoiceBundle]:
-    allocations = dict(initial_allocations)
     regular_demand_by_course = regular_demand_by_course or {}
     protected_groups = protected_groups or set()
+    allocations = (
+        solve_student_choice_allocations_cp_sat(
+            ordered_choices,
+            initial_allocations,
+            bucket_by_course,
+            buckets,
+            regular_demand_by_course=regular_demand_by_course,
+            protected_groups=protected_groups,
+        )
+        or dict(initial_allocations)
+    )
+    allocations = improve_student_choice_allocations_by_objective(
+        ordered_choices,
+        allocations,
+        bucket_by_course,
+        buckets,
+        regular_demand_by_course=regular_demand_by_course,
+        protected_groups=protected_groups,
+    )
     course_demand = demand_with_regular_floor(
         incremental_demand_from_bundle_allocations(allocations.values(), regular_demand_by_course),
         regular_demand_by_course,
@@ -1391,6 +1585,7 @@ def restore_minimum_student_coverage(
     for student_id, candidates in sorted(unplanned_by_student.items()):
         candidates.sort(
             key=lambda item: (
+                demand_choice_penalty(item[1]),
                 item[1].preference_order,
                 -bundle_priority(item[1]),
                 bundle_created_at(item[1]),
@@ -1565,13 +1760,41 @@ def demand_small_excess_count(demand: int, regular_capacity: int, large_capacity
 
 
 def demand_choice_penalty(choice: DemandChoiceBundle) -> float:
-    return max(0, choice.preference_order - 1) * 18.0 - bundle_priority(choice) * 0.5
+    return (
+        max(0, choice.preference_order - 1) * 18.0
+        - bundle_priority(choice) * 5.0
+        - bundle_institutional_value(choice)
+    )
 
 
 def bundle_priority(bundle: DemandChoiceBundle) -> float:
     if not bundle.choices:
         return 0.0
     return sum(choice.request.priority for choice in bundle.choices) / len(bundle.choices)
+
+
+def bundle_institutional_value(bundle: DemandChoiceBundle) -> float:
+    if not bundle.choices:
+        return 0.0
+    return sum(choice_institutional_value(choice) for choice in bundle.choices) / len(bundle.choices)
+
+
+def choice_institutional_value(choice: Any) -> float:
+    value = 0.0
+    if choice.relation == "regular":
+        value += 50.0
+    elif choice.relation == "reoffer":
+        value += 34.0
+    elif choice.relation == "elective":
+        value += 4.0
+    if choice.eligibility_course.kind == CourseKind.mandatory:
+        value += 24.0
+    semester_delay = max(
+        0,
+        choice.student.current_semester - choice.eligibility_course.recommended_semester,
+    )
+    value += min(40.0, semester_delay * 6.0)
+    return value
 
 
 def bundle_created_at(bundle: DemandChoiceBundle):

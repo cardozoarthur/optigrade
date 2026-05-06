@@ -221,6 +221,7 @@ class StudentCoursePlanBranchCreate(BaseModel):
     preference_order: int = Field(ge=1, le=50)
     priority: int = Field(default=3, ge=1, le=5)
     label: str | None = Field(default=None, max_length=120)
+    choice_group: str | None = Field(default=None, max_length=80)
     items: list[StudentCoursePlanItemCreate] = Field(min_length=1, max_length=12)
 
 

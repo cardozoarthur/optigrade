@@ -1,4 +1,7 @@
+import unicodedata
+
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -218,12 +221,16 @@ def submit_complex_student_course_plan(
     db.query(StudentCourseRequest).filter(
         StudentCourseRequest.student_id == student_id,
         StudentCourseRequest.target_semester == payload.target_semester,
-        StudentCourseRequest.alternative_group == payload.alternative_group,
+        or_(
+            StudentCourseRequest.alternative_group == payload.alternative_group,
+            StudentCourseRequest.alternative_group.like(f"{payload.alternative_group}:%"),
+        ),
         StudentCourseRequest.stage == payload.stage,
-    ).delete()
+    ).delete(synchronize_session=False)
 
     requests: list[StudentCourseRequest] = []
     for branch in sorted(payload.branches, key=lambda item: item.preference_order):
+        alternative_group = scoped_alternative_group(payload.alternative_group, branch.choice_group)
         for item_index, item in enumerate(branch.items, start=1):
             course = require_course(db, item.course_id)
             validate_student_course(db, student, course)
@@ -233,7 +240,7 @@ def submit_complex_student_course_plan(
                 target_semester=payload.target_semester,
                 priority=item.priority if item.priority is not None else branch.priority,
                 preference_order=branch.preference_order,
-                alternative_group=payload.alternative_group,
+                alternative_group=alternative_group,
                 stage=payload.stage,
                 source=payload.source,
                 note=complex_plan_item_note(branch.label, item.note, item_index),
@@ -410,3 +417,21 @@ def complex_plan_item_note(branch_label: str | None, item_note: str | None, item
     if parts:
         return " | ".join(parts)
     return f"Item {item_index} do pacote de preferencias"
+
+
+def scoped_alternative_group(base: str, choice_group: str | None) -> str:
+    if not choice_group:
+        return base[:80]
+    safe_group = sanitize_group_key(choice_group)
+    if not safe_group:
+        return base[:80]
+    max_base_length = max(1, 79 - len(safe_group))
+    return f"{base[:max_base_length]}:{safe_group}"[:80]
+
+
+def sanitize_group_key(value: str) -> str:
+    stripped = unicodedata.normalize("NFKD", value)
+    normalized = "".join(char for char in stripped if not unicodedata.combining(char)).lower()
+    normalized = normalized.replace(" ", "-")
+    safe = "".join(char if char.isalnum() or char in "-_:" else "-" for char in normalized)
+    return safe.strip("-")[:48]

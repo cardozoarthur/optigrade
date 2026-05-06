@@ -1,3 +1,4 @@
+from app.api.routes import students as student_routes
 from app.models.entities import (
     Campus,
     ConstraintStrength,
@@ -16,6 +17,7 @@ from app.models.entities import (
     StudentCourseStatus,
     TimeSlot,
 )
+from app.schemas import StudentCoursePlanCreate
 from app.services.optimizer import build_snapshot
 from app.services.student_planning import build_student_suggestions
 from app.services.student_planning import student_demand_summary
@@ -628,3 +630,86 @@ def test_pilot_regular_room_capacity_stays_between_10_and_50() -> None:
     assert min(capacities) >= REGULAR_ROOM_MIN_CAPACITY
     assert max(capacities) <= REGULAR_ROOM_MAX_CAPACITY
     assert AUDITORIUM_CAPACITY == 200
+
+
+def test_complex_plan_submission_scopes_alternatives_by_choice_group(db_session) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    algebra = Course(
+        name="Algebra Linear",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    geometry = Course(
+        name="Geometria Analitica",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    international_relations = Course(
+        name="Relacoes Internacionais",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.elective,
+        recommended_semester=4,
+        expected_demand=20,
+    )
+    student = Student(name="Aluno Plano", degree_program_id=program.id, current_semester=2)
+    db_session.add_all([calculus, algebra, geometry, international_relations, student])
+    db_session.commit()
+
+    requests = student_routes.submit_complex_student_course_plan(
+        student.id,
+        StudentCoursePlanCreate(
+            target_semester="2026/2",
+            alternative_group="trajetoria-principal",
+            branches=[
+                {
+                    "choice_group": "recuperar calculo",
+                    "preference_order": 1,
+                    "priority": 5,
+                    "label": "Cálculo A",
+                    "items": [{"course_id": calculus.id}],
+                },
+                {
+                    "choice_group": "recuperar calculo",
+                    "preference_order": 2,
+                    "priority": 4,
+                    "label": "Álgebra + Geometria",
+                    "items": [{"course_id": algebra.id}, {"course_id": geometry.id}],
+                },
+                {
+                    "choice_group": "humanas",
+                    "preference_order": 1,
+                    "priority": 5,
+                    "label": "Relações Internacionais",
+                    "items": [{"course_id": international_relations.id}],
+                },
+            ],
+        ),
+        db_session,
+    )
+
+    groups_by_course = {request.course_id: request.alternative_group for request in requests}
+    assert groups_by_course[calculus.id] == "trajetoria-principal:recuperar-calculo"
+    assert groups_by_course[algebra.id] == "trajetoria-principal:recuperar-calculo"
+    assert groups_by_course[geometry.id] == "trajetoria-principal:recuperar-calculo"
+    assert groups_by_course[international_relations.id] == "trajetoria-principal:humanas"

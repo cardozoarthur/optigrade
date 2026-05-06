@@ -756,7 +756,10 @@ def test_demand_planner_closes_marginal_course_when_second_option_absorbs_studen
     assert snapshot.courses[0].expected_demand == 6
     assert snapshot.student_demand_plan["selected_demand_by_course"] == {physics.id: 6}
     assert snapshot.student_demand_plan["alternative_assignments"] == 3
-    assert snapshot.student_demand_plan["consolidated_choice_groups"] == 3
+    assert (
+        snapshot.student_demand_plan["choice_solver_assignments"]
+        + snapshot.student_demand_plan["consolidated_choice_groups"]
+    ) == 3
     assert snapshot.student_demand_plan["unplanned_choice_groups"] == 0
     assert diagnose_snapshot(snapshot) == []
 
@@ -1268,6 +1271,242 @@ def test_demand_solver_selects_complex_conditional_bundle_instead_of_single_cour
     assert snapshot.student_demand_plan["alternative_assignments"] == 2
     assert snapshot.student_demand_plan["complex_bundle_groups"] == 2
     assert branch_two_request_ids <= selected_request_ids
+
+
+def test_demand_solver_mixes_independent_course_level_choice_units(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    calculus = Course(
+        name="Calculo A",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    algebra = Course(
+        name="Algebra Linear",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    geometry = Course(
+        name="Geometria Analitica",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    international_relations = Course(
+        name="Relacoes Internacionais",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.elective,
+        recommended_semester=4,
+        expected_demand=20,
+    )
+    physics = Course(
+        name="Fisica I",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    room = Room(name="Sala regular", capacity=50, kind=RoomKind.lecture)
+    db_session.add_all([calculus, algebra, geometry, international_relations, physics, room])
+    db_session.flush()
+
+    calculus_students = [
+        Student(name=f"Calculo {index:02d}", degree_program_id=program.id, current_semester=2)
+        for index in range(50)
+    ]
+    seed_algebra = Student(name="Base algebra", degree_program_id=program.id, current_semester=2)
+    seed_geometry = Student(name="Base geometria", degree_program_id=program.id, current_semester=2)
+    seed_ri = Student(name="Base relacoes", degree_program_id=program.id, current_semester=2)
+    complex_students = [
+        Student(name=f"Aluno unidade {index}", degree_program_id=program.id, current_semester=2)
+        for index in range(2)
+    ]
+    db_session.add_all([*calculus_students, seed_algebra, seed_geometry, seed_ri, *complex_students])
+    db_session.flush()
+
+    for student in calculus_students:
+        db_session.add(
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=calculus.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+        )
+    for student, course in [
+        (seed_algebra, algebra),
+        (seed_geometry, geometry),
+        (seed_ri, international_relations),
+    ]:
+        db_session.add(
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=course.id,
+                target_semester="2026/2",
+                priority=5,
+            )
+        )
+
+    math_fallback_request_ids: set[str] = set()
+    humanities_first_request_ids: set[str] = set()
+    physics_fallback_request_ids: set[str] = set()
+    for index, student in enumerate(complex_students):
+        math_group = f"math-{index}"
+        load_group = f"load-{index}"
+        db_session.add(
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=calculus.id,
+                target_semester="2026/2",
+                priority=5,
+                preference_order=1,
+                alternative_group=math_group,
+            )
+        )
+        math_fallback = [
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=algebra.id,
+                target_semester="2026/2",
+                priority=4,
+                preference_order=2,
+                alternative_group=math_group,
+            ),
+            StudentCourseRequest(
+                student_id=student.id,
+                course_id=geometry.id,
+                target_semester="2026/2",
+                priority=4,
+                preference_order=2,
+                alternative_group=math_group,
+            ),
+        ]
+        humanities_first = StudentCourseRequest(
+            student_id=student.id,
+            course_id=international_relations.id,
+            target_semester="2026/2",
+            priority=5,
+            preference_order=1,
+            alternative_group=load_group,
+        )
+        physics_fallback = StudentCourseRequest(
+            student_id=student.id,
+            course_id=physics.id,
+            target_semester="2026/2",
+            priority=4,
+            preference_order=2,
+            alternative_group=load_group,
+        )
+        db_session.add_all([*math_fallback, humanities_first, physics_fallback])
+        db_session.flush()
+        math_fallback_request_ids.update(request.id for request in math_fallback)
+        humanities_first_request_ids.add(humanities_first.id)
+        physics_fallback_request_ids.add(physics_fallback.id)
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+    demand_by_name = {course.name: course.expected_demand for course in snapshot.courses}
+    selected_request_ids = set(snapshot.student_demand_plan["selected_request_ids"])
+
+    assert demand_by_name == {
+        "Algebra Linear": 3,
+        "Calculo A": 50,
+        "Geometria Analitica": 3,
+        "Relacoes Internacionais": 3,
+    }
+    assert math_fallback_request_ids <= selected_request_ids
+    assert humanities_first_request_ids <= selected_request_ids
+    assert not physics_fallback_request_ids & selected_request_ids
+    assert snapshot.student_demand_plan["alternative_assignments"] == 2
+    assert snapshot.student_demand_plan["complex_bundle_groups"] == 2
+
+
+def test_demand_solver_scores_institutional_value_instead_of_first_available_order(
+    db_session,
+) -> None:
+    program = DegreeProgram(name="Engenharia de Producao", code="EP")
+    db_session.add(program)
+    db_session.flush()
+    elective = Course(
+        name="Topicos Livres",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.elective,
+        recommended_semester=2,
+        expected_demand=20,
+    )
+    critical = Course(
+        name="Disciplina Critica",
+        degree_program_id=program.id,
+        workload_hours=2,
+        theoretical_hours=2,
+        kind=CourseKind.mandatory,
+        recommended_semester=1,
+        expected_demand=20,
+    )
+    room = Room(name="Sala regular", capacity=50, kind=RoomKind.lecture)
+    students = [
+        Student(name=f"Aluno valor {index}", degree_program_id=program.id, current_semester=3)
+        for index in range(3)
+    ]
+    db_session.add_all([elective, critical, room, *students])
+    db_session.flush()
+
+    elective_request_ids: set[str] = set()
+    critical_request_ids: set[str] = set()
+    for index, student in enumerate(students):
+        group = f"valor-institucional-{index}"
+        elective_request = StudentCourseRequest(
+            student_id=student.id,
+            course_id=elective.id,
+            target_semester="2026/2",
+            alternative_group=group,
+            preference_order=1,
+            priority=1,
+        )
+        critical_request = StudentCourseRequest(
+            student_id=student.id,
+            course_id=critical.id,
+            target_semester="2026/2",
+            alternative_group=group,
+            preference_order=2,
+            priority=5,
+        )
+        db_session.add_all([elective_request, critical_request])
+        db_session.flush()
+        elective_request_ids.add(elective_request.id)
+        critical_request_ids.add(critical_request.id)
+    db_session.commit()
+
+    snapshot = build_snapshot(db_session, semester="2026/2", demand_driven=True)
+    selected_request_ids = set(snapshot.student_demand_plan["selected_request_ids"])
+
+    assert {course.name: course.expected_demand for course in snapshot.courses} == {
+        "Disciplina Critica": 3,
+    }
+    assert critical_request_ids <= selected_request_ids
+    assert not elective_request_ids & selected_request_ids
+    assert snapshot.student_demand_plan["alternative_assignments"] == 3
+    assert snapshot.student_demand_plan["unplanned_choice_groups"] == 0
 
 
 def test_optimizer_prefers_student_requested_time_window(db_session) -> None:

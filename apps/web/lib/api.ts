@@ -104,6 +104,7 @@ export type StudentCoursePlanItem = {
 export type StudentCoursePlanBranch = {
   preference_order: number;
   priority: number;
+  choice_group?: string | null;
   label?: string | null;
   items: StudentCoursePlanItem[];
 };

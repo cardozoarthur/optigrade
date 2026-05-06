@@ -478,7 +478,7 @@ function OptimizationFlowSlide({ onNext }: { onNext: () => void }) {
     },
     {
       title: "Demanda estudantil",
-      text: "Depois lê as filas de preferência dos alunos, inclusive escolhas compostas do tipo quero X, senão Y e Z.",
+      text: "Depois lê unidades independentes de escolha: uma cadeira pode virar duas alternativas, duas podem substituir uma, e cada unidade compete separadamente no solver.",
       icon: Users
     },
     {

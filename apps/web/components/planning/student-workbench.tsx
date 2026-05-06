@@ -34,6 +34,7 @@ type PlanItemDraft = {
 type PlanBranchDraft = {
   id: string;
   label: string;
+  choiceGroup: string;
   priority: number;
   items: PlanItemDraft[];
 };
@@ -274,7 +275,13 @@ export function StudentWorkbench({
   }
 
   function addBranch() {
-    const nextBranch = createPlanBranch(`Caminho ${complexBranches.length + 1}`, Math.max(1, 5 - complexBranches.length));
+    const nextBranch = createPlanBranch(
+      `Opção ${complexBranches.length + 1}`,
+      Math.max(1, 5 - complexBranches.length),
+      [],
+      createDraftId("branch"),
+      activeBranch?.choiceGroup ?? `demanda-${complexBranches.length + 1}`
+    );
     setComplexBranches((current) => [...current, nextBranch]);
     setActiveBranchId(nextBranch.id);
   }
@@ -372,8 +379,8 @@ export function StudentWorkbench({
                 onChange={(event) => setSelectionMode(event.target.value as SelectionMode)}
               >
                 <option value="independent">Quero cursar todas as selecionadas</option>
-                <option value="queue">Fila: X, senao Y, senao Z</option>
-                <option value="complex">Plano complexo: pacotes condicionais</option>
+                <option value="queue">Fila: X, senão Y, senão Z</option>
+                <option value="complex">Demandas por cadeira com alternativas</option>
               </select>
             </Field>
             <button
@@ -491,10 +498,10 @@ export function StudentWorkbench({
                   <h2 className="text-base font-semibold">Enviar formulário</h2>
                   <p className="mt-1 text-sm text-slate-600">
                     {selectionMode === "complex"
-                      ? `${validComplexBranches.length} caminhos condicionais prontos para o solver.`
+                      ? `${validComplexBranches.length} opções em grupos de demanda prontas para o solver.`
                       : selectionMode === "queue"
-                        ? "A matricula automatica tenta a fila na ordem informada ate encontrar vaga."
-                        : "A otimizacao usa apenas escolhas elegiveis; bloqueios continuam visiveis para ajuste academico."}
+                        ? "A ordem do aluno entra como preferência; o solver ainda compara valor institucional, capacidade e restrições."
+                        : "A otimização usa apenas escolhas elegíveis; bloqueios continuam visíveis para ajuste acadêmico."}
                   </p>
                 </div>
                 <PrimaryButton
@@ -552,16 +559,16 @@ function ComplexPlanBuilder({
     <Panel>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <p className="text-xs font-semibold uppercase text-lake">Plano condicional</p>
-          <h2 className="text-base font-semibold">Quero este caminho, senão aquele</h2>
+          <p className="text-xs font-semibold uppercase text-lake">Demanda estudantil</p>
+          <h2 className="text-base font-semibold">Unidades de escolha por cadeira</h2>
           <p className="mt-1 text-sm text-slate-600">
-            {validBranchCount} caminhos válidos · itens do mesmo caminho entram como pacote.
+            {validBranchCount} opções válidas · opções com o mesmo grupo competem entre si.
           </p>
         </div>
         <PrimaryButton onClick={onAddBranch}>
           <span className="inline-flex items-center gap-2">
             <Plus size={16} />
-            Caminho
+            Opção
           </span>
         </PrimaryButton>
       </div>
@@ -578,19 +585,27 @@ function ComplexPlanBuilder({
                 : "border-slateLine bg-white text-ink hover:border-lake"
             }`}
           >
-            {index + 1}. {branch.label || "Caminho"} · {branch.items.length}
+            {index + 1}. {branch.choiceGroup} · {branch.label || "Opção"} · {branch.items.length}
           </button>
         ))}
       </div>
 
       {activeBranch ? (
         <motion.div layout className="mt-4 grid gap-3">
-          <div className="grid gap-3 md:grid-cols-[1fr_140px_40px]">
-            <Field label="Nome do caminho">
+          <div className="grid gap-3 md:grid-cols-[1fr_180px_140px_40px]">
+            <Field label="Nome da opção">
               <input
                 className={inputClass}
                 value={activeBranch.label}
                 onChange={(event) => onUpdateBranch(activeBranch.id, { label: event.target.value })}
+              />
+            </Field>
+            <Field label="Grupo da demanda">
+              <input
+                className={inputClass}
+                value={activeBranch.choiceGroup}
+                onChange={(event) => onUpdateBranch(activeBranch.id, { choiceGroup: event.target.value })}
+                placeholder="demanda-1"
               />
             </Field>
             <Field label="Prioridade">
@@ -606,7 +621,7 @@ function ComplexPlanBuilder({
             <div className="flex items-end">
               <IconButton
                 icon={Trash2}
-                label="Remover caminho"
+                label="Remover opção"
                 disabled={branches.length <= 1}
                 onClick={() => onRemoveBranch(activeBranch.id)}
               />
@@ -695,7 +710,7 @@ function ComplexPlanBuilder({
             </AnimatePresence>
             {!activeBranch.items.length ? (
               <div className="rounded-md border border-dashed border-slateLine px-4 py-6 text-center text-sm text-slate-600">
-                Caminho sem cadeiras.
+                Opção sem cadeiras.
               </div>
             ) : null}
           </div>
@@ -706,7 +721,7 @@ function ComplexPlanBuilder({
             className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slateLine text-sm font-semibold transition hover:-translate-y-0.5 hover:border-lake hover:text-lake"
           >
             <Plus size={16} />
-            Adicionar cadeira ao caminho
+            Adicionar cadeira à opção
           </button>
         </motion.div>
       ) : null}
@@ -978,11 +993,13 @@ function createPlanBranch(
   label: string,
   priority: number,
   items: PlanItemDraft[] = [],
-  id = createDraftId("branch")
+  id = createDraftId("branch"),
+  choiceGroup = "demanda-1"
 ): PlanBranchDraft {
   return {
     id,
     label,
+    choiceGroup,
     priority,
     items
   };
@@ -990,8 +1007,8 @@ function createPlanBranch(
 
 function defaultComplexBranches() {
   return [
-    createPlanBranch("Caminho A", 5, [], "branch-default-a"),
-    createPlanBranch("Caminho B", 4, [], "branch-default-b")
+    createPlanBranch("Opção principal", 5, [], "branch-default-a", "demanda-1"),
+    createPlanBranch("Se não", 4, [], "branch-default-b", "demanda-1")
   ];
 }
 
@@ -999,8 +1016,27 @@ function seedComplexBranchesFromSuggestions(suggestions: StudentCourseSuggestion
   const eligible = suggestions.filter((item) => item.eligible).map((item) => item.course.id);
   if (!eligible.length) return defaultComplexBranches();
   return [
-    createPlanBranch("Caminho A", 5, eligible.slice(0, 1).map((courseId) => createPlanItem(courseId))),
-    createPlanBranch("Caminho B", 4, eligible.slice(1, 3).map((courseId) => createPlanItem(courseId)))
+    createPlanBranch(
+      "Opção principal",
+      5,
+      eligible.slice(0, 1).map((courseId) => createPlanItem(courseId)),
+      createDraftId("branch"),
+      "demanda-1"
+    ),
+    createPlanBranch(
+      "Se não",
+      4,
+      eligible.slice(1, 3).map((courseId) => createPlanItem(courseId)),
+      createDraftId("branch"),
+      "demanda-1"
+    ),
+    createPlanBranch(
+      "Outra prioridade",
+      5,
+      eligible.slice(3, 4).map((courseId) => createPlanItem(courseId)),
+      createDraftId("branch"),
+      "demanda-2"
+    )
   ];
 }
 
@@ -1009,6 +1045,7 @@ function buildComplexPlanBranches(
   eligibleCourseIds: Set<string>
 ): {
   branches: Array<{
+    choice_group: string;
     preference_order: number;
     priority: number;
     label: string | null;
@@ -1043,6 +1080,7 @@ function buildComplexPlanBranches(
     }
     if (items.length) {
       payloadBranches.push({
+        choice_group: branch.choiceGroup || `demanda-${index + 1}`,
         preference_order: index + 1,
         priority: branch.priority,
         label: branch.label || null,

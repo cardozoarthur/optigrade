@@ -213,6 +213,10 @@ def submit_student_choices(
     requests: list[StudentCourseRequest] = []
     if payload.branches:
         for branch in sorted(payload.branches, key=lambda item: item.preference_order):
+            alternative_group = scoped_alternative_group(
+                "fila-apresentacao-complexa",
+                branch.choice_group,
+            )
             for item_index, item in enumerate(branch.items, start=1):
                 course = db.get(Course, item.course_id)
                 if not course:
@@ -225,7 +229,7 @@ def submit_student_choices(
                     target_semester=presentation_token.semester,
                     priority=item.priority if item.priority is not None else branch.priority,
                     preference_order=branch.preference_order,
-                    alternative_group="fila-apresentacao-complexa",
+                    alternative_group=alternative_group,
                     desired_day=item.desired_day,
                     desired_start_minute=item.desired_start_minute,
                     desired_end_minute=item.desired_end_minute,
@@ -286,6 +290,22 @@ def presentation_plan_note(branch_label: str | None, item_note: str | None, item
     if parts:
         return " | ".join(parts)
     return f"Item {item_index} do plano enviado por QR Code"
+
+
+def scoped_alternative_group(base: str, choice_group: str | None) -> str:
+    if not choice_group:
+        return base[:80]
+    safe_group = sanitize_group_key(choice_group)
+    if not safe_group:
+        return base[:80]
+    max_base_length = max(1, 79 - len(safe_group))
+    return f"{base[:max_base_length]}:{safe_group}"[:80]
+
+
+def sanitize_group_key(value: str) -> str:
+    normalized = normalize_text(value).replace(" ", "-")
+    safe = "".join(char if char.isalnum() or char in "-_:" else "-" for char in normalized)
+    return safe.strip("-")[:48]
 
 
 def presentation_teacher_professor(db: Session) -> Professor | None:

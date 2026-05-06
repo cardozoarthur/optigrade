@@ -135,38 +135,28 @@ def run_enrollment_round(
                 reserve_branch_capacity(planned, capacity_plan, used_by_bucket)
                 solver_planned_allocations += len(planned)
 
-    max_order = max(
-        (
-            preference_order
-            for branches in branches_by_group.values()
-            for preference_order in branches
-        ),
-        default=0,
-    )
-    for preference_order in range(1, max_order + 1):
-        round_branches = [
-            (group, branch)
-            for group, branches in branches_by_group.items()
-            if group not in allocated_by_group
-            for branch_order, branch in branches.items()
-            if branch_order == preference_order
-        ]
-        round_branches.sort(
-            key=lambda item: (
-                -branch_score(item[1]),
-                branch_preference_order(item[1]),
-                -branch_priority(item[1]),
-                item[1][0].student.current_semester,
-                item[1][0].student.registration_number or item[1][0].student.name,
-            )
+    scored_branches = [
+        (group, branch)
+        for group, branches in branches_by_group.items()
+        if group not in allocated_by_group
+        for branch in branches.values()
+    ]
+    scored_branches.sort(
+        key=lambda item: (
+            -branch_score(item[1]),
+            branch_preference_order(item[1]),
+            -branch_priority(item[1]),
+            item[1][0].student.current_semester,
+            item[1][0].student.registration_number or item[1][0].student.name,
         )
-        for group, branch in round_branches:
-            if group in allocated_by_group:
-                continue
-            if not branch_has_capacity(branch, capacity_plan, used_by_bucket, capacity_by_course, assignment_windows):
-                continue
-            allocated_by_group[group] = branch
-            reserve_branch_capacity(branch, capacity_plan, used_by_bucket)
+    )
+    for group, branch in scored_branches:
+        if group in allocated_by_group:
+            continue
+        if not branch_has_capacity(branch, capacity_plan, used_by_bucket, capacity_by_course, assignment_windows):
+            continue
+        allocated_by_group[group] = branch
+        reserve_branch_capacity(branch, capacity_plan, used_by_bucket)
 
     students_without_enrollment_before_rescue = students_without_enrollment_count(
         candidates_by_group,
@@ -375,9 +365,9 @@ def rescue_students_without_enrollment(
         candidates = sorted(
             candidates_by_student[student_id],
             key=lambda candidate: (
+                -candidate.score,
                 candidate.request.preference_order,
                 -candidate.request.priority,
-                -candidate.score,
                 candidate.request.created_at,
                 candidate.course.name,
             ),
