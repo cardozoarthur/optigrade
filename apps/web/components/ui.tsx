@@ -51,19 +51,24 @@ export function PrimaryButton({
   children,
   onClick,
   disabled,
-  type = "button"
+  type = "button",
+  className
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   type?: "button" | "submit";
+  className?: string;
 }) {
   return (
     <button
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className="focus-ring inline-flex h-10 items-center justify-center rounded-md bg-lake px-4 text-sm font-semibold text-white transition duration-150 ease-out hover:-translate-y-0.5 hover:bg-[#155876] hover:shadow-panel active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+      className={clsx(
+        "focus-ring inline-flex h-10 items-center justify-center rounded-md bg-lake px-4 text-sm font-semibold text-white transition duration-150 ease-out hover:-translate-y-0.5 hover:bg-[#155876] hover:shadow-panel active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0",
+        className
+      )}
     >
       {children}
     </button>

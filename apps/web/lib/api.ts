@@ -281,6 +281,60 @@ export type PresentationStudentCreated = {
   suggestions: StudentSuggestions;
 };
 
+export type PortalResultStatus = "waiting" | "running" | "ready" | "failed";
+
+export type PortalCalendarEntry = {
+  id: string;
+  course_id: string;
+  course_name: string;
+  course_code?: string | null;
+  course_degree_program_name?: string | null;
+  course_period?: string | null;
+  section_label?: string | null;
+  professor_id?: string | null;
+  professor_name?: string | null;
+  room_name?: string | null;
+  campus_name?: string | null;
+  day: number;
+  start_minute: number;
+  end_minute: number;
+  status?: string | null;
+  score?: number | null;
+  score_breakdown?: Record<string, unknown>;
+  reason?: string | null;
+  decision_type?: string | null;
+  requested_course_name?: string | null;
+  origin_degree_program_name?: string | null;
+  enrolled_count?: number;
+  students?: Array<{
+    id: string;
+    name: string;
+    degree_program_name?: string | null;
+    score?: number | null;
+    reason?: string | null;
+  }>;
+};
+
+export type PortalUnallocatedEntry = {
+  id: string;
+  course_id: string;
+  course_name: string;
+  course_degree_program_name?: string | null;
+  status: string;
+  score: number;
+  reason?: string | null;
+};
+
+export type PortalOptimizationResult = {
+  status: PortalResultStatus;
+  run_id?: string | null;
+  run_status?: string | null;
+  updated_at: string;
+  message?: string | null;
+  calendar: PortalCalendarEntry[];
+  unallocated?: PortalUnallocatedEntry[];
+};
+
 export type Assignment = {
   id: string;
   run_id: string;

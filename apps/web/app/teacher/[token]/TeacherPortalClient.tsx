@@ -1,26 +1,28 @@
 "use client";
 
-import React, { FormEvent, useEffect, useMemo, useState } from "react";
+import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowDown,
   ArrowUp,
   BookOpenCheck,
   CalendarClock,
-  Check,
   Loader2,
   MessageSquareText,
   Plus,
   Send,
   Trash2
 } from "lucide-react";
-import { Course, dayLabels } from "@/lib/api";
+import { Course, dayLabels, PortalOptimizationResult } from "@/lib/api";
+import { PortalResultPanel } from "@/components/portal-result-calendar";
 import { Field, IconButton, Panel, PrimaryButton, inputClass } from "@/components/ui";
+import { useToast } from "@/components/toast-provider";
 
 type Portal = {
   professor_id: string;
   professor_name: string;
   semester: string;
+  submitted_at?: string | null;
   courses: Course[];
 };
 
@@ -45,7 +47,10 @@ type ConstraintDraft = {
   strength: string;
 };
 
+const RESULT_POLL_INTERVAL_MS = 120000;
+
 export default function TeacherPortalClient({ token }: { token: string }) {
+  const toast = useToast();
   const [portal, setPortal] = useState<Portal | null>(null);
   const [availabilityDraft, setAvailabilityDraft] = useState<AvailabilityDraft>(() => newAvailabilityDraft());
   const [availabilityQueue, setAvailabilityQueue] = useState<AvailabilityDraft[]>([]);
@@ -56,8 +61,10 @@ export default function TeacherPortalClient({ token }: { token: string }) {
   const [constraintStrength, setConstraintStrength] = useState("soft");
   const [constraintQueue, setConstraintQueue] = useState<ConstraintDraft[]>([]);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [result, setResult] = useState<PortalOptimizationResult | null>(null);
+  const [resultLoading, setResultLoading] = useState(false);
+  const [lastResultCheck, setLastResultCheck] = useState<Date | null>(null);
 
   const courseById = useMemo(
     () => Object.fromEntries((portal?.courses ?? []).map((course) => [course.id, course])),
@@ -70,28 +77,53 @@ export default function TeacherPortalClient({ token }: { token: string }) {
       .then((data) => {
         setPortal(data);
         setCourseId(data.courses[0]?.id ?? "");
+        if (data.submitted_at) setSubmitted(true);
       })
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, [token]);
+      .catch((reason: unknown) =>
+        toast.error(reason instanceof Error ? reason.message : String(reason), "Falha ao carregar portal")
+      );
+  }, [toast, token]);
+
+  const fetchResult = useCallback(async () => {
+    setResultLoading(true);
+    try {
+      const nextResult = await teacherPortalApi<PortalOptimizationResult>(`/${token}/result`);
+      setResult(nextResult);
+      setLastResultCheck(new Date());
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : String(reason), "Falha ao buscar resultado");
+    } finally {
+      setResultLoading(false);
+    }
+  }, [toast, token]);
+
+  useEffect(() => {
+    if (!submitted || !portal) return;
+    void fetchResult();
+    const interval = window.setInterval(() => {
+      void fetchResult();
+    }, RESULT_POLL_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [fetchResult, portal, submitted]);
 
   function addAvailability() {
-    setError(null);
     if (toMinutes(availabilityDraft.end) <= toMinutes(availabilityDraft.start)) {
-      setError("Janela de horario invalida.");
+      toast.error("Janela de horário inválida.", "Revise a disponibilidade");
       return;
     }
     setAvailabilityQueue((items) => [...items, { ...availabilityDraft, id: nextDraftId() }].sort(sortAvailability));
     setAvailabilityDraft((current) => ({ ...current, start: current.end, end: addHours(current.end, 2) }));
+    toast.success("Janela adicionada à fila.");
   }
 
   function addPreference() {
     if (!courseId) return;
-    setError(null);
     if (courseQueue.some((item) => item.courseId === courseId)) {
-      setError("Esta cadeira ja esta na fila.");
+      toast.info("Esta cadeira já está na fila.");
       return;
     }
     setCourseQueue((items) => [...items, { id: nextDraftId(), courseId, preference }]);
+    toast.success("Cadeira adicionada à fila.");
   }
 
   function addNaturalRule() {
@@ -99,14 +131,13 @@ export default function TeacherPortalClient({ token }: { token: string }) {
     if (!text) return;
     setConstraintQueue((items) => [...items, { id: nextDraftId(), text, strength: constraintStrength }]);
     setConstraintDraft("");
+    toast.success("Restrição adicionada à fila.");
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!hasItems) return;
     setBusy(true);
-    setError(null);
-    setStatus(null);
     try {
       await teacherPortalApi(`/${token}/submit`, {
         method: "POST",
@@ -135,9 +166,10 @@ export default function TeacherPortalClient({ token }: { token: string }) {
       setAvailabilityQueue([]);
       setCourseQueue([]);
       setConstraintQueue([]);
-      setStatus(`${total} restricoes enviadas para ${portal?.semester ?? "o semestre"}`);
+      setSubmitted(true);
+      toast.success(`${total} restrições enviadas para ${portal?.semester ?? "o semestre"}.`, "Preferências registradas");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      toast.error(reason instanceof Error ? reason.message : String(reason), "Falha ao enviar restrições");
     } finally {
       setBusy(false);
     }
@@ -154,41 +186,39 @@ export default function TeacherPortalClient({ token }: { token: string }) {
     );
   }
 
+  if (submitted) {
+    return (
+      <PortalResultPanel
+        title={portal.professor_name}
+        subtitle={`Portal do professor · ${portal.semester}`}
+        result={result}
+        loading={resultLoading}
+        lastCheckedAt={lastResultCheck}
+        perspective="teacher"
+        onRefresh={fetchResult}
+      />
+    );
+  }
+
   return (
-    <main className="min-h-screen bg-[#eef3f7]">
+    <main className="min-h-screen overflow-x-hidden bg-[#eef3f7]">
       <header className="border-b border-slateLine bg-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-4">
-          <div>
+        <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-4 sm:px-5 md:flex-row md:items-center md:justify-between">
+          <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-normal text-lake">Portal do professor</p>
-            <h1 className="mt-1 text-xl font-semibold">{portal.professor_name}</h1>
+            <h1 className="mt-1 break-words text-xl font-semibold sm:text-2xl">{portal.professor_name}</h1>
             <p className="text-sm text-slate-600">{portal.semester}</p>
           </div>
-          <div className="rounded-md border border-slateLine bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          <div className="w-full rounded-md border border-slateLine bg-slate-50 px-3 py-2 text-xs text-slate-600 sm:w-auto">
             {availabilityQueue.length} janelas · {courseQueue.length} cadeiras · {constraintQueue.length} regras
           </div>
         </div>
       </header>
 
-      <form onSubmit={submit} className="mx-auto grid max-w-6xl gap-4 px-5 py-5">
-        <AnimatePresence>
-          {status ? (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              className="flex items-center gap-2 rounded-md border border-moss/30 bg-moss/10 px-4 py-3 text-sm text-moss"
-            >
-              <Check size={18} /> {status}
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-        {error ? (
-          <div className="rounded-md border border-rose/30 bg-rose/10 px-4 py-3 text-sm text-rose">{error}</div>
-        ) : null}
-
+      <form onSubmit={submit} className="mx-auto grid max-w-6xl gap-4 px-4 py-5 pb-28 sm:px-5">
         <section className="grid gap-4 lg:grid-cols-[380px_1fr]">
           <Panel>
-            <div className="mb-3 flex items-center justify-between">
+            <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="flex items-center gap-2 text-base font-semibold">
                 <CalendarClock size={18} className="text-lake" />
                 Janelas por dia
@@ -196,7 +226,7 @@ export default function TeacherPortalClient({ token }: { token: string }) {
               <button
                 type="button"
                 onClick={addAvailability}
-                className="focus-ring inline-flex h-9 items-center gap-2 rounded-md border border-slateLine px-3 text-sm font-semibold transition hover:border-lake hover:text-lake"
+                className="focus-ring inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-slateLine px-3 text-sm font-semibold transition hover:border-lake hover:text-lake sm:w-auto"
               >
                 <Plus size={16} />
                 Adicionar
@@ -219,7 +249,7 @@ export default function TeacherPortalClient({ token }: { token: string }) {
                 </select>
               </Field>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Inicio">
+                <Field label="Início">
                   <input
                     className={inputClass}
                     type="time"
@@ -243,12 +273,12 @@ export default function TeacherPortalClient({ token }: { token: string }) {
                     value={availabilityDraft.kind}
                     onChange={(event) => setAvailabilityDraft((current) => ({ ...current, kind: event.target.value }))}
                   >
-                    <option value="available">Disponivel</option>
+                    <option value="available">Disponível</option>
                     <option value="preferred">Preferido</option>
-                    <option value="unavailable">Indisponivel</option>
+                    <option value="unavailable">Indisponível</option>
                   </select>
                 </Field>
-                <Field label="Forca">
+                <Field label="Força">
                   <select
                     className={inputClass}
                     value={availabilityDraft.strength}
@@ -269,7 +299,7 @@ export default function TeacherPortalClient({ token }: { token: string }) {
               <BookOpenCheck size={18} className="text-lake" />
               Fila de cadeiras desejadas
             </h2>
-            <div className="grid gap-3 md:grid-cols-[1fr_150px_auto]">
+            <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_150px_auto]">
               <Field label="Cadeira">
                 <select className={inputClass} value={courseId} onChange={(event) => setCourseId(event.target.value)}>
                   {portal.courses.map((course) => (
@@ -291,7 +321,7 @@ export default function TeacherPortalClient({ token }: { token: string }) {
                 />
               </Field>
               <div className="flex items-end">
-                <PrimaryButton type="button" onClick={addPreference}>
+                <PrimaryButton type="button" onClick={addPreference} className="w-full md:w-auto">
                   <span className="inline-flex items-center gap-2">
                     <Plus size={16} />
                     Enfileirar
@@ -309,21 +339,21 @@ export default function TeacherPortalClient({ token }: { token: string }) {
         </section>
 
         <Panel>
-          <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h2 className="flex items-center gap-2 text-base font-semibold">
               <MessageSquareText size={18} className="text-lake" />
-              Restricoes complexas
+              Restrições complexas
             </h2>
             <button
               type="button"
               onClick={addNaturalRule}
-              className="focus-ring inline-flex h-9 items-center gap-2 rounded-md border border-slateLine px-3 text-sm font-semibold transition hover:border-lake hover:text-lake"
+              className="focus-ring inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-slateLine px-3 text-sm font-semibold transition hover:border-lake hover:text-lake sm:w-auto"
             >
               <Plus size={16} />
               Adicionar
             </button>
           </div>
-          <div className="grid gap-3 lg:grid-cols-[1fr_180px]">
+          <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_180px]">
             <Field label="Regra em linguagem natural">
               <textarea
                 className="focus-ring min-h-24 rounded-md border border-slateLine bg-white p-3 text-sm text-ink transition hover:border-slate-400"
@@ -332,7 +362,7 @@ export default function TeacherPortalClient({ token }: { token: string }) {
                 placeholder="Ex.: posso dar Calculo A apenas se as aulas terminarem antes das 17h nas tercas e quintas."
               />
             </Field>
-            <Field label="Forca da regra">
+            <Field label="Força da regra">
               <select
                 className={inputClass}
                 value={constraintStrength}
@@ -347,16 +377,18 @@ export default function TeacherPortalClient({ token }: { token: string }) {
           <ConstraintQueue items={constraintQueue} onRemove={(id) => setConstraintQueue((items) => items.filter((item) => item.id !== id))} />
         </Panel>
 
-        <div className="flex flex-wrap items-center justify-end gap-3">
+        <div className="fixed inset-x-3 bottom-3 z-30 rounded-lg border border-slateLine bg-white/95 p-3 shadow-panel backdrop-blur sm:static sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none sm:backdrop-blur-0">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
           <span className="text-sm text-slate-600">
             {availabilityQueue.length + courseQueue.length + constraintQueue.length} itens na fila
           </span>
-          <PrimaryButton type="submit" disabled={!hasItems || busy}>
+          <PrimaryButton type="submit" disabled={!hasItems || busy} className="w-full sm:w-auto">
             <span className="inline-flex items-center gap-2">
               {busy ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-              Enviar restricoes
+              Enviar restrições
             </span>
           </PrimaryButton>
+          </div>
         </div>
       </form>
     </main>
@@ -423,7 +455,7 @@ function CourseQueue({
                 {index + 1}
               </div>
               <div className="text-sm">
-                <p className="font-semibold text-ink">{course?.name ?? "Cadeira removida do catalogo"}</p>
+                <p className="font-semibold text-ink">{course?.name ?? "Cadeira removida do catálogo"}</p>
                 <p className="text-xs text-slate-600">
                   Preferencia {item.preference}
                   {course?.context_key ? ` · contexto ${course.context_key}` : ""}
@@ -532,9 +564,9 @@ function moveById<T extends { id: string }>(items: T[], id: string, direction: -
 }
 
 function availabilityKindLabel(value: string) {
-  if (value === "unavailable") return "indisponivel";
+  if (value === "unavailable") return "indisponível";
   if (value === "preferred") return "preferido";
-  return "disponivel";
+  return "disponível";
 }
 
 function strengthLabel(value: string) {

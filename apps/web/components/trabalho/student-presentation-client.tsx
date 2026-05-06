@@ -1,15 +1,17 @@
 "use client";
 
-import React, { FormEvent, useEffect, useMemo, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { Check, GraduationCap, Loader2, Plus, Send, Sparkles, Trash2 } from "lucide-react";
+import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { GraduationCap, Loader2, Plus, Send, Sparkles, Trash2 } from "lucide-react";
 import {
   Course,
+  PortalOptimizationResult,
   PresentationStudentCreated,
   PresentationStudentToken,
   Student,
   StudentCourseSuggestion
 } from "@/lib/api";
+import { PortalResultPanel } from "@/components/portal-result-calendar";
+import { useToast } from "@/components/toast-provider";
 
 type TimePreferenceStrength = "hard" | "soft" | "manual_override";
 
@@ -38,8 +40,12 @@ const weekDays = [
   { value: "5", label: "Sábado" }
 ];
 
+const RESULT_POLL_INTERVAL_MS = 120000;
+
 export function StudentPresentationClient({ token }: { token: string }) {
+  const toast = useToast();
   const [portal, setPortal] = useState<PresentationStudentToken | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [student, setStudent] = useState<Student | null>(null);
   const [suggestions, setSuggestions] = useState<StudentCourseSuggestion[]>([]);
   const [branches, setBranches] = useState<PresentationPlanBranch[]>(() => defaultPresentationBranches());
@@ -47,8 +53,10 @@ export function StudentPresentationClient({ token }: { token: string }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [result, setResult] = useState<PortalOptimizationResult | null>(null);
+  const [resultLoading, setResultLoading] = useState(false);
+  const [lastResultCheck, setLastResultCheck] = useState<Date | null>(null);
   const activeBranch = branches.find((branch) => branch.id === activeBranchId) ?? branches[0];
   const activeBranchCourseIds = activeBranch?.items.map((item) => item.courseId) ?? [];
   const eligibleCourseIds = useMemo(
@@ -71,8 +79,11 @@ export function StudentPresentationClient({ token }: { token: string }) {
   useEffect(() => {
     publicApi<PresentationStudentToken>(`/api/trabalho/alunos/${token}`)
       .then(setPortal)
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, [token]);
+      .catch((reason: unknown) => {
+        setLoadFailed(true);
+        toast.error(reason instanceof Error ? reason.message : String(reason), "Falha ao carregar QR Code");
+      });
+  }, [toast, token]);
 
   useEffect(() => {
     if (!activeBranchId && branches[0]) {
@@ -80,10 +91,34 @@ export function StudentPresentationClient({ token }: { token: string }) {
     }
   }, [activeBranchId, branches]);
 
+  const fetchResult = useCallback(async () => {
+    if (!student) return;
+    setResultLoading(true);
+    try {
+      const nextResult = await publicApi<PortalOptimizationResult>(
+        `/api/trabalho/alunos/${token}/students/${student.id}/result`
+      );
+      setResult(nextResult);
+      setLastResultCheck(new Date());
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : String(reason), "Falha ao buscar resultado");
+    } finally {
+      setResultLoading(false);
+    }
+  }, [student, toast, token]);
+
+  useEffect(() => {
+    if (!submitted || !student) return;
+    void fetchResult();
+    const interval = window.setInterval(() => {
+      void fetchResult();
+    }, RESULT_POLL_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [fetchResult, student, submitted]);
+
   async function createStudent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
-    setError(null);
     try {
       const created = await publicApi<PresentationStudentCreated>(`/api/trabalho/alunos/${token}/students`, {
         method: "POST",
@@ -94,9 +129,11 @@ export function StudentPresentationClient({ token }: { token: string }) {
       const seededBranches = seedPresentationBranches(created.suggestions.suggestions);
       setBranches(seededBranches);
       setActiveBranchId(seededBranches[0]?.id ?? "");
-      setStatus("Histórico gerado. Agora revise seu plano de preferência.");
+      setSubmitted(false);
+      setResult(null);
+      toast.success("Histórico gerado. Agora revise seu plano de preferência.", "Aluno criado");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      toast.error(reason instanceof Error ? reason.message : String(reason), "Falha ao criar aluno");
     } finally {
       setBusy(false);
     }
@@ -107,19 +144,19 @@ export function StudentPresentationClient({ token }: { token: string }) {
     if (!student) return;
     const plan = buildPresentationPayload(branches, eligibleCourseIds);
     if (plan.error || !plan.branches.length) {
-      setError(plan.error ?? "Adicione ao menos uma cadeira elegível ao plano.");
+      toast.error(plan.error ?? "Adicione ao menos uma cadeira elegível ao plano.", "Revise suas escolhas");
       return;
     }
     setBusy(true);
-    setError(null);
     try {
       await publicApi(`/api/trabalho/alunos/${token}/students/${student.id}/choices`, {
         method: "POST",
         body: JSON.stringify({ course_ids: [], queue_mode: true, branches: plan.branches })
       });
-      setStatus("Fila enviada. O resultado aparecerá após a rodada administrativa.");
+      setSubmitted(true);
+      toast.success("Fila enviada. O resultado aparecerá após a rodada administrativa.", "Escolhas registradas");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      toast.error(reason instanceof Error ? reason.message : String(reason), "Falha ao enviar escolhas");
     } finally {
       setBusy(false);
     }
@@ -177,7 +214,7 @@ export function StudentPresentationClient({ token }: { token: string }) {
     );
   }
 
-  if (!portal && !error) {
+  if (!portal && !loadFailed) {
     return (
       <main className="grid min-h-screen place-items-center bg-[#f6f8fb] px-5 text-sm text-slate-600">
         <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Carregando QR Code</span>
@@ -185,36 +222,44 @@ export function StudentPresentationClient({ token }: { token: string }) {
     );
   }
 
+  if (!portal && loadFailed) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f6f8fb] px-5 text-center text-sm text-slate-600">
+        QR Code expirado ou indisponível.
+      </main>
+    );
+  }
+
+  if (portal && student && submitted) {
+    return (
+      <PortalResultPanel
+        title={`Calendário de ${student.name}`}
+        subtitle={`${portal.degree_program.name} · ${portal.semester}`}
+        result={result}
+        loading={resultLoading}
+        lastCheckedAt={lastResultCheck}
+        perspective="student"
+        onRefresh={fetchResult}
+      />
+    );
+  }
+
   return (
-    <main className="min-h-screen bg-[#f6f8fb] px-4 py-5 text-ink">
+    <main className="min-h-screen overflow-x-hidden bg-[#f6f8fb] px-3 py-4 pb-28 text-ink sm:px-4 sm:py-5">
       <div className="mx-auto grid max-w-5xl gap-4">
-        <header className="rounded-lg border border-slateLine bg-white p-4 shadow-panel">
+        <header className="rounded-lg border border-slateLine bg-white p-4 shadow-panel sm:p-5">
           <p className="text-xs font-semibold uppercase text-lake">OptiGrade · apresentação</p>
-          <h1 className="mt-1 text-2xl font-semibold">Escolha de cadeiras para o próximo semestre</h1>
+          <h1 className="mt-1 text-xl font-semibold leading-tight sm:text-2xl">Escolha de cadeiras para o próximo semestre</h1>
           <p className="mt-1 text-sm text-slate-600">
             {portal?.degree_program.name ?? "Curso"} · {portal?.semester ?? "2026/2"}
           </p>
         </header>
 
-        <AnimatePresence>
-          {status ? (
-            <motion.div
-              initial={{ opacity: 0, y: -8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              className="flex items-center gap-2 rounded-md border border-moss/30 bg-moss/10 px-4 py-3 text-sm text-moss"
-            >
-              <Check size={17} /> {status}
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-        {error ? <div className="rounded-md border border-rose/30 bg-rose/10 px-4 py-3 text-sm text-rose">{error}</div> : null}
-
         {!student ? (
-          <form onSubmit={createStudent} className="grid gap-4 rounded-lg border border-slateLine bg-white p-4 shadow-panel">
-            <div className="flex items-center gap-3">
-              <GraduationCap className="text-lake" />
-              <div>
+          <form onSubmit={createStudent} className="grid gap-4 rounded-lg border border-slateLine bg-white p-4 shadow-panel sm:p-5">
+            <div className="flex items-start gap-3">
+              <GraduationCap className="mt-1 shrink-0 text-lake" />
+              <div className="min-w-0">
                 <h2 className="font-semibold">Criar aluno de teste</h2>
                 <p className="text-sm text-slate-600">O sistema vai gerar um histórico acadêmico aleatório para simular dependências.</p>
               </div>
@@ -227,27 +272,27 @@ export function StudentPresentationClient({ token }: { token: string }) {
               E-mail opcional
               <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} className={inputClass} />
             </label>
-            <button disabled={busy} className={primaryClass}>
+            <button disabled={busy} className={`${primaryClass} w-full sm:w-auto`}>
               {busy ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
               Gerar sugestões
             </button>
           </form>
         ) : (
           <form onSubmit={submitChoices} className="grid gap-4">
-            <section className="rounded-lg border border-slateLine bg-white p-4 shadow-panel">
+            <section className="rounded-lg border border-slateLine bg-white p-4 shadow-panel sm:p-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
+                <div className="min-w-0">
                   <h2 className="text-base font-semibold">Plano principal: quero X, senão Y + Z</h2>
                   <p className="mt-1 text-sm text-slate-600">
                     {activeBranch?.label ?? "Caminho"} · {activeBranch?.items.length ?? 0} cadeiras no pacote atual.
                   </p>
                 </div>
-                <button type="button" onClick={addBranch} className={secondaryClass}>
+                <button type="button" onClick={addBranch} className={`${secondaryClass} w-full sm:w-auto`}>
                   <Plus size={16} />
                   Caminho
                 </button>
               </div>
-              <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+              <div className="mt-4 flex max-w-full gap-2 overflow-x-auto pb-1">
                 {branches.map((branch, index) => (
                   <button
                     type="button"
@@ -292,7 +337,7 @@ export function StudentPresentationClient({ token }: { token: string }) {
                   {activeBranch.items.map((item) => (
                     <div
                       key={item.id}
-                      className="grid gap-2 rounded-md border border-slateLine bg-slate-50 p-3 md:grid-cols-[minmax(160px,1fr)_110px_100px_100px_120px_40px]"
+                      className="grid min-w-0 gap-2 rounded-md border border-slateLine bg-slate-50 p-3 md:grid-cols-[minmax(160px,1fr)_110px_100px_100px_120px_40px]"
                     >
                       <label className="grid gap-1 text-xs font-semibold">
                         Cadeira
@@ -355,12 +400,12 @@ export function StudentPresentationClient({ token }: { token: string }) {
                 </div>
               ) : null}
             </section>
-            <section className="sticky bottom-3 rounded-lg border border-slateLine bg-white/95 p-3 shadow-panel backdrop-blur">
+            <section className="fixed inset-x-3 bottom-3 z-30 rounded-lg border border-slateLine bg-white/95 p-3 shadow-panel backdrop-blur sm:sticky sm:inset-x-auto">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-sm text-slate-600">
                   {selectedItems.length} cadeiras na fila de {student.name}
                 </p>
-                <button disabled={busy || selectedItems.length === 0} className={primaryClass}>
+                <button disabled={busy || selectedItems.length === 0} className={`${primaryClass} w-full sm:w-auto`}>
                   {busy ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
                   Enviar escolhas
                 </button>

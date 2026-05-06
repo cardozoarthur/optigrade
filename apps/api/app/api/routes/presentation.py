@@ -35,6 +35,7 @@ from app.schemas import (
     PresentationStudentCreatedRead,
     PresentationStudentTokenRead,
 )
+from app.services.portal_results import build_student_portal_result
 from app.services.student_planning import build_student_suggestions, course_eligible_for_student
 
 router = APIRouter()
@@ -261,6 +262,23 @@ def submit_student_choices(
     for request in requests:
         db.refresh(request)
     return {"requests": requests}
+
+
+@router.get("/student-tokens/{token}/students/{student_id}/result")
+def get_student_result(
+    token: str,
+    student_id: str,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    presentation_token = require_student_token(db, token)
+    student = db.get(Student, student_id)
+    if not student or student.degree_program_id != presentation_token.degree_program_id:
+        raise HTTPException(status_code=404, detail="Aluno nao encontrado para este QR Code")
+    return build_student_portal_result(
+        db,
+        student=student,
+        semester=presentation_token.semester,
+    )
 
 
 def presentation_plan_note(branch_label: str | None, item_note: str | None, item_index: int) -> str:

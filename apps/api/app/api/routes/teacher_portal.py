@@ -13,6 +13,7 @@ from app.models.entities import (
 )
 from app.schemas import TeacherPortalRead, TeacherPortalSubmit
 from app.services.constraint_intelligence import interpret_teacher_constraint
+from app.services.portal_results import as_aware, build_teacher_portal_result
 
 router = APIRouter()
 
@@ -20,7 +21,7 @@ router = APIRouter()
 def _load_invitation(token: str, db: Session) -> InvitationLink:
     invitation = db.query(InvitationLink).filter(InvitationLink.token == token).one_or_none()
     now = datetime.now(timezone.utc)
-    if not invitation or invitation.revoked or invitation.expires_at < now:
+    if not invitation or invitation.revoked or as_aware(invitation.expires_at) < now:
         raise HTTPException(status_code=404, detail="Convite invalido ou expirado")
     return invitation
 
@@ -33,6 +34,7 @@ def get_portal(token: str, db: Session = Depends(get_db)) -> TeacherPortalRead:
         professor_id=invitation.professor_id,
         professor_name=invitation.professor.name,
         semester=invitation.semester,
+        submitted_at=invitation.submitted_at,
         courses=courses,
     )
 
@@ -81,3 +83,13 @@ def submit_constraints(
         "natural_language_constraints": len(payload.natural_language_constraints),
     }
 
+
+@router.get("/{token}/result")
+def get_portal_result(token: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    invitation = _load_invitation(token, db)
+    return build_teacher_portal_result(
+        db,
+        professor_id=invitation.professor_id,
+        semester=invitation.semester,
+        submitted_after=invitation.submitted_at,
+    )

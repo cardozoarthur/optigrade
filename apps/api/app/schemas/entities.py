@@ -446,6 +446,7 @@ class TeacherPortalRead(BaseModel):
     professor_id: str
     professor_name: str
     semester: str
+    submitted_at: datetime | None = None
     courses: list[CourseRead]
 
 

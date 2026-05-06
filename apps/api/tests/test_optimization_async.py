@@ -1,4 +1,6 @@
-from app.api.routes import optimization, presentation
+from datetime import datetime, timedelta, timezone
+
+from app.api.routes import optimization, presentation, teacher_portal
 from app.models.entities import (
     AvailabilityKind,
     Campus,
@@ -6,7 +8,9 @@ from app.models.entities import (
     Course,
     CourseKind,
     DegreeProgram,
+    InvitationLink,
     OptimizationRun,
+    PresentationToken,
     Professor,
     ProfessorAvailability,
     ProfessorContract,
@@ -257,3 +261,115 @@ def test_presentation_teacher_link_prefers_steffani(db_session) -> None:
     selected = presentation.presentation_teacher_professor(db_session)
 
     assert selected.id == steffani.id
+
+
+def test_portal_results_expose_ready_student_and_teacher_calendars(db_session) -> None:
+    campus = Campus(name="Campus Anglo", city="Pelotas")
+    program = DegreeProgram(name="Engenharia de Producao", campus=campus)
+    course = Course(
+        name="Pesquisa Operacional",
+        campus=campus,
+        degree_program=program,
+        workload_hours=68,
+        theoretical_hours=68,
+        practical_hours=0,
+        kind=CourseKind.mandatory,
+        recommended_semester=4,
+        expected_demand=1,
+        requires_lab=False,
+        criticality=5,
+        context_key="pesquisa-operacional",
+        shareable=True,
+    )
+    professor = Professor(name="STEFFANI NIKOLI DAPPER", department="Centro de Engenharias")
+    slot = TimeSlot(day=2, start_minute=19 * 60, end_minute=21 * 60, label="Qua 19:00")
+    room = Room(name="Sala 201", capacity=30, kind=RoomKind.lecture)
+    student = Student(name="Aluno QR", degree_program=program, current_semester=4)
+    db_session.add_all([campus, program, course, professor, slot, room, student])
+    db_session.flush()
+    room.campus_id = campus.id
+    request = StudentCourseRequest(
+        student_id=student.id,
+        course_id=course.id,
+        target_semester="2026/2",
+        priority=5,
+        preference_order=1,
+        alternative_group="fila-apresentacao-complexa",
+        stage="pre_enrollment",
+        source="presentation",
+    )
+    db_session.add(request)
+    db_session.flush()
+    run = OptimizationRun(
+        semester="2026/2",
+        profile="balanced",
+        status=RunStatus.feasible,
+        parameters={"source": "trabalho", "auto_enrollment": True},
+        metrics={
+            "planned_sections": [
+                {
+                    "db_course_id": course.id,
+                    "section_index": 0,
+                    "section_label": "Turma 1",
+                    "course_name": course.name,
+                    "planned_students": 1,
+                }
+            ]
+        },
+    )
+    db_session.add(run)
+    db_session.flush()
+    db_session.add_all(
+        [
+            optimization.Assignment(
+                run_id=run.id,
+                course_id=course.id,
+                professor_id=professor.id,
+                room_id=room.id,
+                time_slot_id=slot.id,
+                session_index=0,
+                origin="optimized",
+            ),
+            StudentEnrollment(
+                student_id=student.id,
+                course_id=course.id,
+                request_id=request.id,
+                run_id=run.id,
+                target_semester="2026/2",
+                stage="pre_enrollment",
+                status="enrolled",
+                score=110,
+                score_breakdown={"regular": 25},
+                reason="Alocado pela rodada automatica",
+            ),
+            PresentationToken(
+                token="student-result-token",
+                kind="student",
+                semester="2026/2",
+                degree_program_id=program.id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            ),
+            InvitationLink(
+                professor_id=professor.id,
+                token="teacher-result-token",
+                semester="2026/2",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                submitted_at=request.created_at,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    student_result = presentation.get_student_result(
+        "student-result-token",
+        student.id,
+        db_session,
+    )
+    teacher_result = teacher_portal.get_portal_result("teacher-result-token", db_session)
+
+    assert student_result["status"] == "ready"
+    assert student_result["calendar"][0]["course_name"] == "Pesquisa Operacional"
+    assert student_result["calendar"][0]["professor_name"] == "STEFFANI NIKOLI DAPPER"
+    assert teacher_result["status"] == "ready"
+    assert teacher_result["calendar"][0]["enrolled_count"] == 1
+    assert teacher_result["calendar"][0]["students"][0]["name"] == "Aluno QR"
